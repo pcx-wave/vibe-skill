@@ -152,7 +152,7 @@ if _sf:
     except Exception:
         pass
 "
-VIBE_EXIT=$?
+VIBE_EXIT=${PIPESTATUS[0]}
 
 # ── Real Mistral token counts from session log ─────────────────────────────────
 VIBE_HOME="${VIBE_HOME:-$HOME/.vibe}"
