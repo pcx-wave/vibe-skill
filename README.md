@@ -4,14 +4,15 @@
 
 ![MIT License](https://img.shields.io/badge/license-MIT-blue.svg) ![Shell](https://img.shields.io/badge/language-Shell-green.svg) ![GitHub stars](https://img.shields.io/github/stars/pcx-wave/vibe-skill?style=social) ![Claude Code skill](https://img.shields.io/badge/-Claude%20Code%20skill-CC785C)
 
+**Claude orchestrates. Vibe does the heavy lifting. You review the diff, save tokens, costs and avoid hitting limits!**
+Claude sees only ~500–1500 tokens per run regardless of how many file reads Vibe performs internally — massive savings on exploratory and implementation tasks.
+
+Summary:
 1. User types `/vibe <instruction>` in Claude Code
 2. Claude decomposes the task and writes a prompt
-3. `vibe-delegate` runs Mistral Vibe (or Gemini CLI) in a pseudo-TTY
+3. `vibe-delegate` runs Mistral Vibe in a pseudo-TTY
 4. The delegate reports tool calls, token counts, and `git diff --stat`
 5. Claude reviews the diff and summarizes the result
-
-**Claude orchestrates. Vibe and Gemini do the heavy lifting. You review the diff.**
-Claude sees only ~500–1500 tokens per run regardless of how many file reads Vibe or Gemini performs internally — massive savings on exploratory and implementation tasks.
 
 ---
 
@@ -160,9 +161,13 @@ Edit `~/.claude/skills/vibe/SKILL.md`: adjust **Known projects**, **Max turns**,
 
 ---
 
+## Sister project
+
+A parallel delegate using **Gemini CLI** is available at [pcx-wave/gemini-skill](https://github.com/pcx-wave/gemini-skill). Same orchestration pattern, same run log format — different model and trade-offs.
+
 ## Cross-delegate benchmarking
 
-vibe-skill and [gemini-skill](https://github.com/pcx-wave/gemini-skill) share the same `~/.local/share/delegate-runs.jsonl` schema, so you can run the same task on both delegates and compare cost, duration, and tool_calls side by side.
+vibe-skill and gemini-skill share the same `~/.local/share/delegate-runs.jsonl` schema, so you can run the same task on both delegates and compare cost, duration, and tool_calls side by side.
 
 Useful queries:
 
@@ -177,15 +182,9 @@ jq -r '.cost_usd' ~/.local/share/delegate-runs.jsonl \
 
 ---
 
-## Sister project
-
-A parallel delegate using **Gemini CLI** is available at [pcx-wave/gemini-skill](https://github.com/pcx-wave/gemini-skill). Same orchestration pattern, same run log format — different model and trade-offs.
-
----
-
 ## Feedback
 
-See [`docs/feedback-claude-sonnet.md`](docs/feedback-claude-sonnet.md) for the original feedback from Claude that drove the iterations on `vibe-delegate` — real bugs hit, root causes, and the fixes applied.
+See [`docs/feedback-claude-sonnet.md`](docs/feedback-claude-sonnet.md) for original feedback from Claude after hours of practice that drove the iterations on `vibe-delegate` — real bugs hit, root causes, and the fixes applied.
 
 ---
 
