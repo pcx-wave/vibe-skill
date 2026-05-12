@@ -76,7 +76,15 @@ trap 'rm -f "$VIBE_SCRIPT" "$PROMPT_FILE" "$DELEGATE_STATS_FILE"' EXIT
 chmod +x "$VIBE_SCRIPT"
 
 # Run vibe inside `script` to give it a pseudo-TTY (required — vibe hangs without one).
-timeout "$TIMEOUT_SECS" script -q -c "$VIBE_SCRIPT" /dev/null | python3 -c "
+# GNU/Linux uses: script -q -c \"cmd\" /dev/null
+# macOS (BSD) uses: script -q /dev/null \"cmd\"
+if [[ "$(uname)" == "Darwin" ]]; then
+  SCRIPT_CMD=(script -q /dev/null "$VIBE_SCRIPT")
+else
+  SCRIPT_CMD=(script -q -c "$VIBE_SCRIPT" /dev/null)
+fi
+
+timeout "$TIMEOUT_SECS" "${SCRIPT_CMD[@]}" | python3 -c "
 import sys, json, re, os
 
 ANSI_RE = re.compile(r'\x1b\[[0-9;]*[mABCDEFGHJKSTfhilmnprsu]|\x1b\([AB]|\x0f|\x0e')
@@ -98,7 +106,7 @@ for raw in sys.stdin:
     role    = msg.get('role', '')
     content = msg.get('content', '') or ''
 
-        if role in ('system', 'user'):
+    if role in ('system', 'user'):
         continue
 
     if role == 'assistant':
@@ -144,7 +152,7 @@ if _sf:
     except Exception:
         pass
 "
-VIBE_EXIT=$?
+VIBE_EXIT=${PIPESTATUS[0]}
 
 # ── Real Mistral token counts from session log ─────────────────────────────────
 VIBE_HOME="${VIBE_HOME:-$HOME/.vibe}"
@@ -250,7 +258,8 @@ rm -f /tmp/vibe-syntax-err.txt
 
 # ── Run log ────────────────────────────────────────────────────────────────────
 END_NS=$(date +%s%N)
-FILES_CHANGED_COUNT=$(printf '%s\n' "$CHANGED" | grep -c '[^[:space:]]' 2>/dev/null || echo 0)
+FILES_CHANGED_COUNT=$(printf '%s\n' "$CHANGED" | grep -c '[^[:space:]]' 2>/dev/null)
+FILES_CHANGED_COUNT=${FILES_CHANGED_COUNT:-0}
 TOTAL_ERRORS=$((PY_ERRORS + JS_ERRORS))
 
 export DELEGATE_NAME="vibe"

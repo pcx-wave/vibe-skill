@@ -32,7 +32,8 @@ Summary:
 
 - [Mistral Vibe](https://vibe.mistral.ai/) CLI installed and authenticated (`vibe --version`)
 - [Claude Code](https://claude.ai/code) with skills enabled
-- `script` command available (GNU coreutils — comes with Linux; on macOS use `brew install util-linux`)
+- `script` command available (GNU/Linux or BSD/macOS variant)
+- `timeout` command available; on macOS install GNU coreutils for `gtimeout` (or ensure your chosen `timeout` fallback is set up)
 - `python3` and optionally `node` for syntax checks
 - A git repository to work in
 
@@ -126,7 +127,8 @@ Claude Code
             └─ ~/tools/vibe-delegate <workdir> <prompt> [turns] [agent] [timeout]
                  ├─ writes prompt to temp file (avoids shell injection with UTF-8/emoji)
                  ├─ generates a temp shell script for the vibe command
-                 ├─ runs: script -q -c "<vibe-script>" /dev/null
+                 ├─ runs: script -q -c "<vibe-script>" /dev/null (Linux)
+                 │        or script -q /dev/null "<vibe-script>" (macOS)
                  │         └─ allocates pseudo-TTY (required — vibe hangs without one)
                  ├─ pipes JSON streaming output through Python parser
                  │         └─ prints [read] / [write] / [WARN] / [vibe] lines
@@ -136,7 +138,7 @@ Claude Code
                  └─ appends JSON entry to ~/.local/share/delegate-runs.jsonl
 ```
 
-The `script -q -c "..." /dev/null` trick allocates a pseudo-TTY; prompt via temp file avoids shell injection with UTF-8/emoji.
+The `script ... /dev/null` trick allocates a pseudo-TTY on both Linux and macOS; prompt via temp file avoids shell injection with UTF-8/emoji.
 
 ---
 

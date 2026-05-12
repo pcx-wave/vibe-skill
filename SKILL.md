@@ -25,7 +25,7 @@ Hard constraints of Mistral Vibe CLI — not config options.
 ### 1. Requires a pseudo-TTY
 Vibe checks for a TTY on startup. Without one (plain pipe), it hangs silently —
 0 tool calls, no output, silent timeout. The `vibe-delegate` script allocates a
-pseudo-TTY via `script -q -c "..." /dev/null`. **Never call vibe directly in a pipe.**
+pseudo-TTY via `script` (Linux: `script -q -c "..." /dev/null`, macOS: `script -q /dev/null "..."`). **Never call vibe directly in a pipe.**
 
 ### 2. UTF-8 / special chars cause `search_replace` failures
 Vibe's `search_replace` tool matches byte-for-byte. Accented chars, curly quotes,
@@ -156,7 +156,7 @@ VERIFY: grep for "datetime.date" in app.py and confirm it appears in fetch_data.
 | `agent`        | *(none)* | See agent table below                           |
 | `timeout-secs` | `180`    | Wall-clock kill timer                           |
 
-The script allocates a pseudo-TTY via `script -q -c` (required — vibe hangs without one).
+The script allocates a pseudo-TTY via `script` (required — vibe hangs without one).
 
 **Available agents:**
 
