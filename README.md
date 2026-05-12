@@ -33,6 +33,7 @@ Summary:
 - [Mistral Vibe](https://vibe.mistral.ai/) CLI installed and authenticated (`vibe --version`)
 - [Claude Code](https://claude.ai/code) with skills enabled
 - `script` command available (GNU/Linux or BSD/macOS variant)
+- `timeout` command available; on macOS install GNU coreutils for `gtimeout` (or ensure your chosen `timeout` fallback is set up)
 - `python3` and optionally `node` for syntax checks
 - A git repository to work in
 
