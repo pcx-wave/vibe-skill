@@ -5,7 +5,9 @@
 ![MIT License](https://img.shields.io/badge/license-MIT-blue.svg) ![Shell](https://img.shields.io/badge/language-Shell-green.svg) ![GitHub stars](https://img.shields.io/github/stars/pcx-wave/vibe-skill?style=social) ![Claude Code skill](https://img.shields.io/badge/-Claude%20Code%20skill-CC785C)
 
 **Claude orchestrates. Vibe does the heavy lifting. You review the diff, save tokens, costs and avoid hitting limits!**
+
 Claude sees only ~500–1500 tokens per run regardless of how many file reads Vibe performs internally — massive savings on exploratory and implementation tasks.
+
 Note that Vibe works natively with Mistral models which are capable and significantly cheaper than Claude, but Vibe can also be configured to use any other provider/model instead. Eg you can use a deepseek model with vibe tooling. 
 
 Summary:
@@ -19,13 +21,13 @@ Summary:
 
 ## Why
 
-| Scenario | Claude-only cost | With vibe-skill |
+| Scenario | Claude-only cost | With vibe-skill + mistral |
 |----------|-------------------|-----------------|
 | Simple 1-file tweak (800 tokens) | ~$0.003 | ~$0.002 |
 | 6-read implementation task (4,800 tokens) | ~$0.018 | ~$0.009 |
 | Complex multi-file refactor (12,000 tokens) | ~$0.045 | ~$0.012 |
 
-> Claude token usage for orchestration overhead: ~0.4 tokens (negligible cost). Vibe consumes Mistral tokens; Claude only sees the compressed final output.
+> Claude token usage for orchestration overhead: ~0.4 tokens (negligible cost). Vibe consumes Mistral tokens if using native model (but you can change to your preferred llm); Claude only sees the compressed final output.
 
 ---
 
