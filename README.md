@@ -6,6 +6,7 @@
 
 **Claude orchestrates. Vibe does the heavy lifting. You review the diff, save tokens, costs and avoid hitting limits!**
 Claude sees only ~500–1500 tokens per run regardless of how many file reads Vibe performs internally — massive savings on exploratory and implementation tasks.
+Note that Vibe works natively with Mistral models which are capable and significantly cheaper than Claude, but Vibe can also be configured to use any other provider/model instead. Eg you can use a deepseek model with vibe tooling. 
 
 Summary:
 1. User types `/vibe <instruction>` in Claude Code
@@ -163,7 +164,9 @@ The `script ... /dev/null` trick allocates a pseudo-TTY on both Linux and macOS;
 
 Vibe's internal turns (file reads, search/replace attempts) consume **Mistral tokens**, not Claude tokens.
 For a task with 6 reads of an 800-line file: ~4800 tokens on Mistral's side, effectively 0 on Claude's.
-Real advantage on exploratory/implementation tasks.
+Real advantage on exploratory/implementation tasks. 
+
+NOTE : Vibe natively works with Mistral models, but that can be changed to any other model while benefitting from Vibe tooling. You can configure your LLM provider/model in your config.toml or yaml file in your .vibe folder.
 
 ---
 
