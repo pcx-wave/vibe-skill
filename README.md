@@ -42,7 +42,7 @@ Summary:
 ## Installation
 
 ```bash
-git clone https://github.com/pcx-wave/vibe-skill.git && cd vibe-skill && mkdir -p ~/tools && cp tools/vibe-delegate ~/tools/ && chmod +x ~/tools/vibe-delegate && mkdir -p ~/.claude/skills/vibe && cp SKILL.md ~/.claude/skills/vibe/SKILL.md
+git clone https://github.com/pcx-wave/vibe-skill.git && cd vibe-skill && mkdir -p ~/tools && ln -sf "$(pwd)/tools/vibe-delegate" ~/tools/vibe-delegate && chmod +x ~/tools/vibe-delegate && mkdir -p ~/.claude/skills/vibe && ln -sf "$(pwd)/SKILL.md" ~/.claude/skills/vibe/SKILL.md
 ```
 
 ### Step-by-step
@@ -52,20 +52,37 @@ git clone https://github.com/pcx-wave/vibe-skill.git && cd vibe-skill && mkdir -
 git clone https://github.com/pcx-wave/vibe-skill.git
 cd vibe-skill
 
-# 2. Install the delegate script
+# 2. Install the delegate script (symlink — stays in sync with git pull)
 mkdir -p ~/tools
-cp tools/vibe-delegate ~/tools/vibe-delegate
+ln -sf "$(pwd)/tools/vibe-delegate" ~/tools/vibe-delegate
 chmod +x ~/tools/vibe-delegate
 
-# 3. Install the skill for Claude Code
+# 3. Install the skill for Claude Code (symlink — stays in sync with git pull)
 mkdir -p ~/.claude/skills/vibe
-cp SKILL.md ~/.claude/skills/vibe/SKILL.md
+ln -sf "$(pwd)/SKILL.md" ~/.claude/skills/vibe/SKILL.md
 
 # 4. Edit the "Known projects" table in ~/.claude/skills/vibe/SKILL.md
 #    to list your own projects with their paths.
 ```
 
 Verify with `~/tools/vibe-delegate /tmp "Say hello in one sentence." 3`
+
+### Updating
+
+Because both installs use symlinks, a `git pull` is all you need:
+
+```bash
+cd ~/vibe-skill && git pull
+```
+
+`~/tools/vibe-delegate` and `~/.claude/skills/vibe/SKILL.md` are automatically up to date — no re-copy needed.
+
+> **Migrating from a previous `cp`-based install?** Replace the copies with symlinks:
+> ```bash
+> cd ~/vibe-skill
+> ln -sf "$(pwd)/tools/vibe-delegate" ~/tools/vibe-delegate
+> ln -sf "$(pwd)/SKILL.md" ~/.claude/skills/vibe/SKILL.md
+> ```
 
 ---
 
