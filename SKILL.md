@@ -279,6 +279,10 @@ Ready to commit?
 - **Max 12 turns per call** — beyond that, Mistral context saturates.
 - **VERIFY with grep, not file re-read** — `grep -n "def foo" file.py` is reliable.
 - **UTF-8 / emoji in the prompt** → the script handles it via temp file, but test with a short prompt first.
+- **After any run that touches imports: grep the import line** — sequential runs can revert each other's import changes. Always run `grep "^from X import" file.py` before the next sub-task.
+- **search_replace [OK] ≠ correct change** — Vibe may report OK even if the match was on unintended content. Always grep the specific changed line, not just check syntax.
+- **Provide data structure context** — Vibe writes against what it knows. If a route accesses a DB payload, include the exact field paths (`payload['produit']['nom']`) in the prompt, not just "extract the name".
+- **Reuse existing assets** — for UI tasks, tell Vibe to link existing CSS/JS files rather than generating new styles. "Use `/static/style.css` and CSS class `bar-row`" is always better than "generate a dark theme".
 
 ---
 
