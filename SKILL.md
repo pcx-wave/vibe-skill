@@ -45,6 +45,19 @@ Vibe sometimes re-inserts a block it has already written (off-by-one in its diff
 logic). Check for duplicate function definitions or repeated class bodies after
 every run.
 
+### 6. Never pass source code through a bash heredoc
+Passing Python/JS code inline in a bash `<< 'PYEOF'` command fails when the code
+contains nested quotes, f-strings, or backslashes — Vibe's bash tool mangles the
+escaping. **This is not a reason to build a workaround script** — that doubles work.
+
+**Right approach for function replacement:**
+- If code is ASCII (no accents, no emoji): use `search_replace` directly — it works.
+- If content is too long for an inline prompt: ask Vibe to **write the new content**
+  to a temp file with its write tool, then `search_replace` the old function using the
+  file's content via `open('/tmp/new.py').read()`.
+- Never write a Python script whose sole job is to call `str.replace()` on another
+  Python file — that is always unnecessary complexity.
+
 ---
 
 ## Known projects
@@ -222,10 +235,12 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 
 | Bug | Cause | Fix |
 |-----|-------|-----|
-| `search_replace failed` | UTF-8/emoji chars in `old_string` | Edit with `python3 str.replace()` |
+| `search_replace failed` | UTF-8/emoji chars in `old_string` | Edit with `python3 str.replace()` — only needed for actual UTF-8, not plain Python code |
 | Duplicated code at end of file | Vibe re-inserts an already-present block | Read diff, delete duplicate manually |
 | Variable declared twice | Same — Vibe doesn't check scope | Grep the variable before relaunching |
 | Truncated prompt | Special chars in inline prompt | Script uses temp file — should be fixed |
+| Wrote a Python helper just to replace code | Misdiagnosed search_replace limit — plain Python code works fine | Use search_replace directly for ASCII code; write_file only if the new content is too long for the prompt |
+| Passed code via bash heredoc | Nested quotes break in Vibe's bash execution | Never put source code in a heredoc; use write_file tool instead |
 
 **If exit non-zero:** do not relaunch immediately. Read the diff, understand what was done, fix the prompt.
 
