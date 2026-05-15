@@ -45,7 +45,7 @@ Summary:
 ## Installation
 
 ```bash
-git clone https://github.com/pcx-wave/vibe-skill.git && cd vibe-skill && mkdir -p ~/tools && ln -sf "$(pwd)/tools/vibe-delegate" ~/tools/vibe-delegate && chmod +x ~/tools/vibe-delegate && mkdir -p ~/.claude/skills/vibe && ln -sf "$(pwd)/SKILL.md" ~/.claude/skills/vibe/SKILL.md
+git clone https://github.com/pcx-wave/vibe-skill.git && cd vibe-skill && mkdir -p ~/tools && ln -sf "$(pwd)/tools/vibe-delegate" ~/tools/vibe-delegate && ln -sf "$(pwd)/tools/delegate-report" ~/tools/delegate-report && chmod +x ~/tools/vibe-delegate ~/tools/delegate-report && mkdir -p ~/.claude/skills/vibe ~/.claude/skills/vibe-report && ln -sf "$(pwd)/SKILL.md" ~/.claude/skills/vibe/SKILL.md && ln -sf "$(pwd)/SKILL.md" ~/.claude/skills/vibe-report/SKILL.md
 ```
 
 ### Step-by-step
@@ -55,14 +55,18 @@ git clone https://github.com/pcx-wave/vibe-skill.git && cd vibe-skill && mkdir -
 git clone https://github.com/pcx-wave/vibe-skill.git
 cd vibe-skill
 
-# 2. Install the delegate script (symlink — stays in sync with git pull)
+# 2. Install the delegate and report scripts (symlinks — stay in sync with git pull)
 mkdir -p ~/tools
 ln -sf "$(pwd)/tools/vibe-delegate" ~/tools/vibe-delegate
-chmod +x ~/tools/vibe-delegate
+ln -sf "$(pwd)/tools/delegate-report" ~/tools/delegate-report
+chmod +x ~/tools/vibe-delegate ~/tools/delegate-report
 
-# 3. Install the skill for Claude Code (symlink — stays in sync with git pull)
+# 3. Install the skills for Claude Code (symlinks — stay in sync with git pull)
 mkdir -p ~/.claude/skills/vibe
 ln -sf "$(pwd)/SKILL.md" ~/.claude/skills/vibe/SKILL.md
+
+mkdir -p ~/.claude/skills/vibe-report
+ln -sf "$(pwd)/SKILL.md" ~/.claude/skills/vibe-report/SKILL.md
 
 # 4. Edit the "Known projects" table in ~/.claude/skills/vibe/SKILL.md
 #    to list your own projects with their paths.
@@ -125,15 +129,17 @@ Prompt  : Stack: Python/Flask. File: app.py ...
   [tool]  file: app.py
   [tool]  search_replace [OK] ...
   [vibe]  Done. Converted date to datetime.date in fetch_data().
-Tool calls: 5
-Mistral tokens (real): 4,800  (4,600 prompt + 200 completion)  |  cost ~$0.0086
-Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
+Tool calls: 5  |  warns: 0  |  sr_fails: 0
+Model               : deepseek-flash
+Mistral tokens (real): 4,800  (4,600 prompt + 200 completion)  |  cost ~$0.0007
+Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x24.0)
+Session total so far : 4,800 tokens  |  session cost ~$0.0007
 === VIBE DONE (exit: 0) ===
 === SYNTAX OK (1 file(s) checked) ===
 
 === UNCOMMITTED CHANGES ===
  app.py | 4 ++--
-[log] → ~/.local/share/delegate-runs.jsonl  (4800 tokens, exit 0, 34.2s)
+[log] → ~/.local/share/delegate-runs.jsonl  (4800 tokens, exit 0, 34.2s, saved ~$0.0161 vs Claude)
 ```
 
 ---
@@ -189,20 +195,45 @@ Edit `~/.claude/skills/vibe/SKILL.md`: adjust **Known projects**, **Max turns**,
 
 A parallel delegate using **Gemini CLI** is available at [pcx-wave/gemini-skill](https://github.com/pcx-wave/gemini-skill). Same orchestration pattern, same run log format — different model and trade-offs.
 
-## Cross-delegate benchmarking
+## Reporting
 
-vibe-skill and gemini-skill share the same `~/.local/share/delegate-runs.jsonl` schema, so you can run the same task on both delegates and compare cost, duration, and tool_calls side by side.
-
-Useful queries:
+Every run is logged to `~/.local/share/delegate-runs.jsonl` with tokens, cost, model, warnings, and failure details. Use the included report script or the `/vibe-report` skill:
 
 ```bash
-# Success rate
-jq -r '[.exit_code] | @tsv' ~/.local/share/delegate-runs.jsonl | sort | uniq -c
-
-# Total cost
-jq -r '.cost_usd' ~/.local/share/delegate-runs.jsonl \
-  | awk '{sum+=$1} END {printf "Total: $%.4f\n", sum}'
+~/tools/delegate-report                  # full report (all time)
+~/tools/delegate-report --since 7        # last 7 days
+~/tools/delegate-report --project myapp  # filter by project
+~/tools/delegate-report --fails          # failures and issues only
 ```
+
+Or from Claude Code: `/vibe-report [args]`
+
+Sample `--fails` output:
+
+```
+FAILURES BY MODEL  (benchmark)
+Model           Fails  Timeout  exit_err  syntax  sr_fail  empty  warn
+--------------  -----  -------  --------  ------  -------  -----  ----
+deepseek-flash  2      .        1         1       .        .      .
+
+FAILURES / ISSUES  (last 2 of 2)
+Date        Project   Model           Type      Exit  Warns  SR  Syn  Dur
+----------  --------  --------------  --------  ----  -----  --  ---  ---
+2026-05-13  myapp     deepseek-flash  syntax    0     .      .   1    23s
+2026-05-12  myapp     deepseek-flash  exit_err  1     .      .   .    34s
+
+LEGEND
+  syntax      Vibe wrote syntactically invalid code
+             → Run py_compile/node --check; fix manually before committing
+  exit_err    Vibe verification failed or crashed
+             → Read git diff; understand partial work before relaunching
+```
+
+Failure types: `timeout` · `exit_err` · `syntax` · `sr_fail` · `empty` · `warn`
+
+## Cross-delegate benchmarking
+
+vibe-skill and gemini-skill share the same `~/.local/share/delegate-runs.jsonl` schema. `delegate-report` groups results by model automatically, so you can compare cost, success rate, and failure patterns across `deepseek-flash`, `mistral-medium`, Gemini, etc. in one command.
 
 ---
 
