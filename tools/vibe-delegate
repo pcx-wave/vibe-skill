@@ -173,15 +173,48 @@ try:
     prompt = stats.get('last_turn_prompt_tokens', 0)
     completion = stats.get('last_turn_completion_tokens', 0)
     total = stats.get('last_turn_total_tokens', prompt + completion)
-    cost_turn = (prompt * 1.5 + completion * 7.5) / 1_000_000
     cost = stats.get('session_cost', 0)
     session_total = stats.get('session_total_llm_tokens', 0)
-    claude_cost = (prompt * 3.0 + completion * 15.0) / 1_000_000
-    model_name = data.get('config', {}).get('active_model', 'mistral')
+    model_name = data.get('config', {}).get('active_model', 'unknown')
+
+    # Read per-model pricing from ~/.vibe/config.toml (fallback: Mistral Medium 3.5 rates)
+    input_price, output_price = 1.5, 7.5
+    try:
+        import tomllib
+    except ImportError:
+        try:
+            import tomli as tomllib
+        except ImportError:
+            tomllib = None
+    if tomllib:
+        config_path = os.path.expanduser('~/.vibe/config.toml')
+        try:
+            with open(config_path, 'rb') as cf:
+                cfg = tomllib.load(cf)
+            active = cfg.get('active_model', model_name)
+            for m in cfg.get('models', []):
+                if m.get('alias') == active or m.get('name') == active:
+                    input_price = m.get('input_price', input_price)
+                    output_price = m.get('output_price', output_price)
+                    break
+        except Exception:
+            pass
+
+    # Each -p invocation creates a new session, so session_total_llm_tokens is
+    # the full run total. last_turn_* covers only the final exchange — wrong for
+    # multi-turn runs (e.g. 10 turns × 8 reads each = ~10× undercount).
+    run_total = session_total if session_total > 0 else total
+    if (prompt + completion) > 0 and run_total > 0:
+        ratio_in = prompt / (prompt + completion)
+        run_tokens_in  = round(run_total * ratio_in)
+        run_tokens_out = run_total - run_tokens_in
+    else:
+        run_tokens_in, run_tokens_out = prompt, completion
+    run_cost = (run_tokens_in * input_price + run_tokens_out * output_price) / 1_000_000
+    claude_cost = (run_tokens_in * 3.0 + run_tokens_out * 15.0) / 1_000_000
     print(f'Model               : {model_name}')
-    print(f'Mistral tokens (real): {total:,}  ({prompt:,} prompt + {completion:,} completion)  |  cost ~\${cost_turn:.4f}')
-    print(f'Claude Sonnet 4.6 eq: same tokens would cost ~\${claude_cost:.4f}  (ratio x{claude_cost/cost_turn:.1f})' if cost_turn > 0 else f'Claude Sonnet 4.6 eq: ~\${claude_cost:.4f}')
-    print(f'Session total so far : {session_total:,} tokens  |  session cost ~\${cost:.4f}')
+    print(f'Delegate tokens (run): {run_total:,}  (last turn: {prompt:,}+{completion:,})  |  cost ~\${run_cost:.4f}')
+    print(f'Claude Sonnet 4.6 eq: same tokens would cost ~\${claude_cost:.4f}  (ratio x{claude_cost/run_cost:.1f})' if run_cost > 0 else f'Claude Sonnet 4.6 eq: ~\${claude_cost:.4f}')
     # Merge token stats into the delegate stats file.
     sf = os.environ.get('DELEGATE_STATS_FILE', '')
     if sf:
@@ -190,10 +223,10 @@ try:
         except Exception:
             existing = {}
         existing.update({
-            'tokens_in':    prompt,
-            'tokens_out':   completion,
-            'tokens_total': total,
-            'cost_usd':     round(cost_turn, 6),
+            'tokens_in':    run_tokens_in,
+            'tokens_out':   run_tokens_out,
+            'tokens_total': run_total,
+            'cost_usd':     round(run_cost, 6),
             'model':        model_name,
         })
         with open(sf, 'w') as wf:
@@ -210,40 +243,78 @@ else
   echo "=== VIBE DONE (exit: $VIBE_EXIT) ==="
 fi
 
-# ── Post-run syntax checks ─────────────────────────────────────────────────────
-# Check any modified Python or JS files automatically — saves a manual step.
+# ── Post-run syntax checks — language-agnostic ────────────────────────────────
 FILES_AFTER=$(git diff --name-only 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null)
 CHANGED=$(comm -13 <(echo "$FILES_BEFORE" | sort) <(echo "$FILES_AFTER" | sort) 2>/dev/null)
 
-PY_ERRORS=0
-JS_ERRORS=0
-CHECKED=0
+SYNTAX_COUNT_FILE=$(mktemp /tmp/vibe-syntax-count-XXXXXX.txt)
+echo 0 > "$SYNTAX_COUNT_FILE"
+export DELEGATE_CHANGED="$CHANGED"
+export SYNTAX_COUNT_FILE
 
-while IFS= read -r f; do
-  [ -z "$f" ] && continue
-  if [[ "$f" == *.py ]] && [ -f "$f" ]; then
-    if ! python3 -m py_compile "$f" 2>/tmp/vibe-syntax-err.txt; then
-      echo "  [SYNTAX ERROR] $f: $(cat /tmp/vibe-syntax-err.txt)"
-      PY_ERRORS=$((PY_ERRORS+1))
-    fi
-    CHECKED=$((CHECKED+1))
-  elif [[ "$f" == *.js ]] && [ -f "$f" ] && command -v node &>/dev/null; then
-    if ! node --check "$f" 2>/tmp/vibe-syntax-err.txt; then
-      echo "  [SYNTAX ERROR] $f: $(cat /tmp/vibe-syntax-err.txt)"
-      JS_ERRORS=$((JS_ERRORS+1))
-    fi
-    CHECKED=$((CHECKED+1))
-  fi
-done <<< "$CHANGED"
+python3 << 'PYSYNTAX'
+import os, shutil, subprocess
 
-if [ "$CHECKED" -gt 0 ]; then
-  TOTAL_ERRORS=$((PY_ERRORS+JS_ERRORS))
-  if [ "$TOTAL_ERRORS" -eq 0 ]; then
-    echo "=== SYNTAX OK ($CHECKED file(s) checked) ==="
-  else
-    echo "=== SYNTAX ERRORS: $TOTAL_ERRORS in $CHECKED file(s) — fix before committing ==="
-  fi
-fi
+changed = [f for f in os.environ.get('DELEGATE_CHANGED', '').splitlines() if f.strip()]
+# CWD is always $WORKDIR — cd "$WORKDIR" runs before this block.
+errors  = 0
+checked = 0
+
+def has(cmd):
+    return shutil.which(cmd) is not None
+
+def check(cmd, label, cwd=None):
+    global errors, checked
+    r = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
+    checked += 1
+    if r.returncode != 0:
+        errors += 1
+        msg = (r.stderr or r.stdout).strip().split('\n')[0][:120]
+        print(f'  [SYNTAX ERROR] {label}: {msg}')
+
+# Per-file checks — tools available without project context
+for f in changed:
+    if not os.path.isfile(f):
+        continue
+    if   f.endswith('.py'):
+        check(['python3', '-m', 'py_compile', f], f)
+    elif f.endswith(('.js', '.mjs', '.cjs')) and has('node'):
+        check(['node', '--check', f], f)
+    elif f.endswith('.rb') and has('ruby'):
+        check(['ruby', '-c', f], f)
+    elif f.endswith(('.sh', '.bash')):
+        check(['bash', '-n', f], f)
+    elif f.endswith('.php') and has('php'):
+        check(['php', '-l', f], f)
+    elif f.endswith('.json'):
+        check(['python3', '-c', 'import json,sys;json.load(open(sys.argv[1]))', f], f)
+
+# Project-level checks — run once if any matching files changed
+live = [f for f in changed if os.path.isfile(f)]
+if any(f.endswith('.go') for f in live) and has('go'):
+    check(['go', 'vet', './...'], 'go vet')
+if any(f.endswith('.rs') for f in live) and has('cargo'):
+    check(['cargo', 'check', '--quiet'], 'cargo check')
+if any(f.endswith(('.ts', '.tsx')) for f in live):
+    if has('tsc') and os.path.isfile('tsconfig.json'):
+        check(['tsc', '--noEmit', '--skipLibCheck'], 'tsc --noEmit')
+    else:
+        print('  [SKIP] tsc — no tsconfig.json found, TypeScript not checked')
+
+if checked > 0:
+    if errors == 0:
+        print(f'=== SYNTAX OK ({checked} check(s)) ===')
+    else:
+        print(f'=== SYNTAX ERRORS: {errors} in {checked} check(s) — fix before committing ===')
+
+cf = os.environ.get('SYNTAX_COUNT_FILE', '')
+if cf:
+    with open(cf, 'w') as fh:
+        fh.write(str(errors))
+PYSYNTAX
+
+TOTAL_ERRORS=$(cat "$SYNTAX_COUNT_FILE" 2>/dev/null || echo 0)
+rm -f "$SYNTAX_COUNT_FILE"
 
 # ── Git summary ────────────────────────────────────────────────────────────────
 GIT_AFTER=$(git rev-parse HEAD 2>/dev/null || echo "no-git")
@@ -262,13 +333,12 @@ else
   git status --short 2>/dev/null
 fi
 
-rm -f /tmp/vibe-syntax-err.txt
 
 # ── Run log ────────────────────────────────────────────────────────────────────
 END_NS=$(date +%s%N)
 FILES_CHANGED_COUNT=$(printf '%s\n' "$CHANGED" | grep -c '[^[:space:]]' 2>/dev/null)
 FILES_CHANGED_COUNT=${FILES_CHANGED_COUNT:-0}
-TOTAL_ERRORS=$((PY_ERRORS + JS_ERRORS))
+TOTAL_ERRORS=${TOTAL_ERRORS:-0}
 
 export DELEGATE_NAME="vibe"
 export DELEGATE_WORKDIR="$WORKDIR"

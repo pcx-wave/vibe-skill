@@ -14,6 +14,21 @@ allowed-tools:
 
 # Vibe Orchestrator
 
+## /vibeon | /vibeoff | /vibestatus
+
+Toggle auto-delegate mode — Vibe automatically handles all coding tasks without
+requiring `/vibe` each time.
+
+| Command | Action |
+|---------|--------|
+| `/vibeon` | `touch ~/.local/share/vibe-auto.flag` → confirm "Auto-vibe ON" |
+| `/vibeoff` | `rm -f ~/.local/share/vibe-auto.flag` → confirm "Auto-vibe OFF" |
+| `/vibestatus` | check `~/.local/share/vibe-auto.flag` → report ON or OFF |
+
+Run the bash command, print one confirmation line, and stop.
+
+---
+
 ## /vibe-report
 
 If the user invokes `/vibe-report`, run `~/tools/delegate-report` with any flags
@@ -61,7 +76,22 @@ Vibe sometimes re-inserts a block it has already written (off-by-one in its diff
 logic). Check for duplicate function definitions or repeated class bodies after
 every run.
 
-### 6. Never pass source code through a bash heredoc
+### 6. Orchestration chain has 6 independent failure points
+The delegation pipeline is: `vibe CLI → pseudo-TTY (script) → Python stream parser →
+TOML pricing lookup → git diff → JSON log`. Each link can fail independently:
+
+| Link | Failure mode | Symptom |
+|------|-------------|---------|
+| Vibe CLI | Auth expired, update broke API | Immediate exit, no output |
+| pseudo-TTY (`script`) | Platform difference (GNU vs BSD flags) | Hangs silently or garbled output |
+| Stream parser | Vibe changes its JSON schema | Tool calls not detected, wrong token count |
+| TOML pricing | `config.toml` missing or renamed | Falls back to Mistral Medium 3.5 rates |
+| git diff | Not a git repo, or Vibe committed mid-run | Wrong file count, misleading stat |
+| JSON log | `~/.local/share/` not writable | Silent log skip, `/vibe-report` misses the run |
+
+When a run produces unexpected results, check these links in order from top to bottom.
+
+### 7. Never pass source code through a bash heredoc
 Passing Python/JS code inline in a bash `<< 'PYEOF'` command fails when the code
 contains nested quotes, f-strings, or backslashes — Vibe's bash tool mangles the
 escaping. **This is not a reason to build a workaround script** — that doubles work.
@@ -76,20 +106,10 @@ escaping. **This is not a reason to build a workaround script** — that doubles
 
 ---
 
-## Known projects
-
-<!-- Customize this table for your own projects -->
-| Name | Path |
-|------|------|
-| my-project | /path/to/my-project |
-
----
-
 ## Step 1 — Detect workdir
 
-1. If the instruction mentions a known project → use its path.
-2. Otherwise: `git rev-parse --show-toplevel` in the current directory.
-3. If ambiguous → ask with `AskUserQuestion`.
+1. `git rev-parse --show-toplevel` in the current directory.
+2. If ambiguous or no git repo → ask with `AskUserQuestion`.
 
 ---
 
@@ -98,11 +118,28 @@ escaping. **This is not a reason to build a workaround script** — that doubles
 **Critical rule**: Vibe is optimized for **atomic, focused tasks**.
 Its system prompt literally says "Most tasks need <150 words."
 
+**Decide whether to delegate at all:**
+
+`vibe-delegate` has real orchestration overhead (pseudo-TTY allocation, stream parser,
+TOML pricing lookup, git diff, JSON log). For trivial changes the setup cost exceeds the
+savings. Apply this filter first:
+
+| Signal | Action |
+|--------|--------|
+| 1 file, ≤ ~10 lines to change, location already known | **Do it directly** — don't delegate |
+| 1 file, logic non-trivial OR location unclear | Delegate — exploration + edit in one run |
+| 2–3 files, single objective | Delegate |
+| >3 files OR multi-step logic OR migrations | Delegate, broken into sub-tasks |
+
+The sweet spot is **medium to heavy tasks** where Vibe's internal file reads and multi-turn
+exploration would otherwise burn significant Claude context.
+
 **Evaluate complexity before launching:**
 
 | Size | Definition | Max turns | Approach |
 |------|-----------|-----------|----------|
-| **Simple** | 1 file, 1 clear change | 5–8 | 1 vibe call |
+| **Trivial** | 1 file, change is obvious and located | — | **Skip delegation — edit directly** |
+| **Simple** | 1 file, non-trivial logic or unknown location | 5–8 | 1 vibe call |
 | **Medium** | 2–3 related files, 1 objective | 8–12 | 1 structured vibe call |
 | **Complex** | >3 files OR business logic OR DB migrations | — | **Break into sub-tasks** |
 
@@ -200,7 +237,7 @@ The script allocates a pseudo-TTY via `script` (required — vibe hangs without 
 - Read/explore: `5`
 - Simple change (1 file): `8`
 - Medium change (2–3 files): `12`
-- Never exceed `15` — decompose instead
+- Never exceed `12` — decompose instead
 
 **Background launch:**
 ```bash
@@ -226,15 +263,17 @@ Prompt  : Stack: Python/Flask. File: app.py ...
   [tool]  search_replace [OK] ...
   [vibe]  Done. Converted date to datetime.date in fetch_data().
 Tool calls: 5
-Mistral tokens (real): 4,800  (4,600 prompt + 200 completion)  |  cost ~$0.0086
+Delegate tokens (run): 4,800  (last turn: 4,600+200)  |  cost ~$0.0086
 Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 === VIBE DONE (exit: 0) ===
-=== SYNTAX OK (1 file(s) checked) ===
+=== SYNTAX OK (1 check(s)) ===
 
 === UNCOMMITTED CHANGES ===
  app.py | 4 ++--
 [log] → ~/.local/share/delegate-runs.jsonl  (4800 tokens, exit 0, 34.2s)
 ```
+
+**Vibe never commits.** All changes are left unstaged — `git checkout .` reverts everything if needed.
 
 **Red flags to act on immediately:**
 
@@ -267,6 +306,48 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 - **Max 3 attempts** per sub-task before escalating to the user.
 - Between attempts, **read the git diff** to avoid doubling partial work.
 - If Vibe completed ≥50% and crashed: finish the rest manually rather than relaunching.
+
+## Step 6b — Log manual completion
+
+When you finish a task manually (after Vibe failures), run this immediately after editing:
+
+```bash
+python3 -c "
+import json, datetime, subprocess, os
+
+workdir = subprocess.run(['git','rev-parse','--show-toplevel'], capture_output=True, text=True).stdout.strip() or os.getcwd()
+project = os.path.basename(workdir.rstrip('/'))
+
+stat = subprocess.run(['git','-C',workdir,'diff','--stat'], capture_output=True, text=True).stdout
+lines_added = sum(
+    int(l.split('+')[1].split()[0])
+    for l in stat.splitlines()
+    if '|' in l and '+' in l
+) if stat else 0
+files_changed = len([l for l in stat.splitlines() if '|' in l])
+
+tokens_out = lines_added * 10
+tokens_in  = lines_added * 40
+cost = (tokens_in * 3.0 + tokens_out * 15.0) / 1_000_000
+
+entry = {
+    'ts': datetime.datetime.utcnow().isoformat() + 'Z',
+    'delegate': 'claude-manual',
+    'workdir': workdir, 'project': project,
+    'exit_code': 0, 'files_changed': files_changed,
+    'tokens_in': tokens_in, 'tokens_out': tokens_out,
+    'tokens_total': tokens_in + tokens_out,
+    'cost_usd': round(cost, 6), 'cost_estimated': True,
+    'lines_added': lines_added,
+}
+log = os.path.expanduser('~/.local/share/delegate-runs.jsonl')
+with open(log, 'a') as f:
+    f.write(json.dumps(entry) + '\n')
+print(f'[log] claude-manual → {project}  ~{lines_added} lines added  est. cost \${cost:.4f}')
+"
+```
+
+Run from anywhere inside the project. Token estimate: output ≈ lines_added × 10, input ≈ lines_added × 40 (context reading). Flagged `cost_estimated: true` in the log.
 
 ---
 

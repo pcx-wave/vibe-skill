@@ -6,7 +6,7 @@
 
 **Claude orchestrates. Vibe does the heavy lifting. You review the diff, save tokens, costs and avoid hitting limits!**
 
-Claude sees only ~500–1500 tokens per run regardless of how many file reads Vibe performs internally — massive savings on exploratory and implementation tasks.
+Claude sees only ~500–1500 tokens per run regardless of how many file reads Vibe performs internally — massive savings on exploratory and implementation tasks. And because Vibe runs in its own process, your Claude session context stays clean: no risk of hitting the context window on long coding sessions.
 
 Note that Vibe works natively with Mistral models which are capable and significantly cheaper than Claude, but Vibe can also be configured to use any other provider/model instead. Eg you can use a deepseek model with vibe tooling. 
 
@@ -21,13 +21,35 @@ Summary:
 
 ## Why
 
-| Scenario | Claude-only cost | With vibe-skill + mistral |
-|----------|-------------------|-----------------|
-| Simple 1-file tweak (800 tokens) | ~$0.003 | ~$0.002 |
-| 6-read implementation task (4,800 tokens) | ~$0.018 | ~$0.009 |
-| Complex multi-file refactor (12,000 tokens) | ~$0.045 | ~$0.012 |
+**Cost savings** — Vibe's file reads and edits consume cheap delegate tokens (or whatever model you configure), not Claude tokens:
 
-> Claude token usage for orchestration overhead: ~0.4 tokens (negligible cost). Vibe consumes Mistral tokens if using native model (but you can change to your preferred llm); Claude only sees the compressed final output.
+| Scenario | Claude Sonnet 4.6 | Mistral Medium 3.5 | DeepSeek V4 Flash |
+|----------|-------------------|--------------------|-------------------|
+| Simple 1-file tweak (800 tokens) | ~$0.004 | ~$0.002 | ~$0.0001 |
+| 6-read implementation task (4,800 tokens) | ~$0.023 | ~$0.012 | ~$0.0008 |
+| Complex multi-file refactor (12,000 tokens) | ~$0.058 | ~$0.029 | ~$0.002 |
+
+> Costs based on official pricing (May 2026): Claude $3/$15 per M tokens, Mistral Medium 3.5 $1.50/$7.50, DeepSeek V4 Flash $0.14/$0.28. Assumes ~85% input / 15% output, typical for coding tasks. Claude orchestration overhead: ~500 tokens per run (negligible).
+
+**Reliability — observed data (64 real runs, not a synthetic benchmark):**
+
+| Model | Runs | Effective completion | Avg tok/run | Tokens in | Tokens out | Total tokens | Hard failures | Warnings | SR failures | Wrote nothing |
+|-------|------|---------------------|-------------|-----------|------------|-------------|--------------|----------|-------------|---------------|
+| Mistral Medium 3.5 | 48 | 94% | 19,772 | 937,577 | 11,501 | 949,078 | 2 | 0 | 0 | — |
+| DeepSeek V4 Flash | 16 | 56% | 18,699 | 295,858 | 3,324 | 299,182 | 0 | 10 | 2 | 5 |
+
+> Effective completion = runs with no hard failure, no syntax error, no SR failure, and at least one file changed. This is a **per-run metric, not a per-task metric**: in practice, Claude relaunches with a corrected prompt after most failures, so the actual task completion rate is higher. DeepSeek's 56% reflects a single day of testing on prompts that had already proven reliable with Mistral — the lower rate is a model behaviour difference, not a prompting issue. In nearly every case a follow-up run succeeded within minutes. Cache hit tokens are not tracked separately by Vibe's session logger.
+
+- **Hard failure** (`exit_err`): Vibe crashed or verification failed — diff may be partial
+- **Warning**: Vibe signalled an internal error mid-run but continued
+- **SR failure**: `search_replace` match failed — file not modified, no silent data loss
+- **Wrote nothing**: Vibe ran tool calls but produced no file changes — prompt too vague or task already done
+
+Trade-off in plain terms: Mistral is quieter but fails hard occasionally; DeepSeek never crashes but generates more noise and requires tighter prompts. On files actively being edited across multiple runs, DeepSeek accumulates more SR failures. Sample size is small — your own `/vibe-report` will give you a more accurate picture over time.
+
+**Context window protection** — On long coding sessions, every file read, function body, and debug loop burns Claude's context. Delegating to Vibe keeps that budget free. Claude enters the task, hands off, and comes back only to review the result — no context bleed from Vibe's internal turns.
+
+**Built-in quality gate** — Claude doesn't just fire and forget. After each Vibe run, Claude reads the `git diff`, checks for syntax errors, and summarizes what changed before reporting back to you. You get a second pair of eyes on every delegation without lifting a finger.
 
 ---
 
@@ -107,6 +129,26 @@ In a Claude Code session:
 
 Claude decomposes the task, writes the Vibe prompt, supervises execution, and reports the diff.
 
+### Vibe-auto mode
+
+For frictionless delegation, enable auto-mode once in your Claude Code session:
+
+```
+/vibeon      — every code request is automatically delegated to Vibe, no /vibe prefix needed
+/vibeoff     — return to normal Claude behaviour
+/vibestatus  — check whether auto-mode is currently ON or OFF
+```
+
+With `vibeon` active, just talk to Claude normally:
+
+```
+add pagination to the /posts route
+fix the broken email validation
+refactor the auth middleware into its own module
+```
+
+Claude intercepts any request that involves writing, editing, or fixing code and delegates it to Vibe transparently. Pure questions and conversations still go directly to Claude — only code tasks are delegated.
+
 ---
 
 ## Terminal output
@@ -127,9 +169,8 @@ Prompt  : Stack: Python/Flask. File: app.py ...
   [vibe]  Done. Converted date to datetime.date in fetch_data().
 Tool calls: 5  |  warns: 0  |  sr_fails: 0
 Model               : deepseek-flash
-Mistral tokens (real): 4,800  (4,600 prompt + 200 completion)  |  cost ~$0.0007
+Delegate tokens (run): 4,800  (last turn: 4,600+200)  |  cost ~$0.0007
 Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x24.0)
-Session total so far : 4,800 tokens  |  session cost ~$0.0007
 === VIBE DONE (exit: 0) ===
 === SYNTAX OK (1 file(s) checked) ===
 
@@ -161,6 +202,17 @@ Claude Code
 ```
 
 The `script ... /dev/null` trick allocates a pseudo-TTY on both Linux and macOS; prompt via temp file avoids shell injection with UTF-8/emoji.
+
+**Shell vs Python split** — `vibe-delegate` started as pure shell. Python is now embedded in four places where shell falls short:
+
+| What | Why Python |
+|------|-----------|
+| JSON stream parser (live output) | Vibe emits a JSON stream; shell can't reliably parse it line by line without race conditions |
+| Token count + cost calculation | Reads `~/.vibe/config.toml` (TOML parsing), looks up per-model pricing, handles float arithmetic |
+| Syntax check (`py_compile`) | stdlib module — one line, no dependencies |
+| Run log writer | Builds a structured JSON entry with multiple computed fields; shell heredoc+`jq` would be fragile |
+
+`delegate-report` is fully Python: it aggregates, sorts, and formats tabular data across hundreds of log entries — the kind of work where shell pipelines become unmaintainable.
 
 ---
 

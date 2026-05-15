@@ -86,20 +86,28 @@ def date_range(runs):
     return f"  {dates[0][:10]} → {dates[-1][:10]}"
 
 
+def is_manual(r):
+    return r.get('delegate') == 'claude-manual'
+
+
 def show_overview(runs):
-    total = len(runs)
-    ok = sum(1 for r in runs if r.get('exit_code') == 0)
-    tokens = sum(r.get('tokens_total', 0) for r in runs)
-    cost = sum(r.get('cost_usd', 0) for r in runs)
-    claude_eq = sum(ceq(r) for r in runs)
-    saved = claude_eq - cost
-    warns = sum(r.get('warn_count', 0) for r in runs)
-    sr_f = sum(r.get('search_replace_fails', 0) for r in runs)
-    syntax = sum(r.get('syntax_errors', 0) for r in runs)
-    timeouts = sum(1 for r in runs if r.get('timed_out'))
-    wrote_nothing = sum(1 for r in runs if r.get('wrote_nothing'))
-    avg_dur = sum(r.get('duration_secs', 0) for r in runs) / total if total else 0
-    saved_pct = f"  ({int(saved / claude_eq * 100)}% cheaper than Claude)" if claude_eq > 0 else ""
+    delegate_runs = [r for r in runs if not is_manual(r)]
+    manual_runs   = [r for r in runs if is_manual(r)]
+
+    total = len(delegate_runs)
+    ok = sum(1 for r in delegate_runs if r.get('exit_code') == 0)
+    tokens = sum(r.get('tokens_total', 0) for r in delegate_runs)
+    cost = sum(r.get('cost_usd', 0) for r in delegate_runs)
+    claude_eq = sum(ceq(r) for r in delegate_runs)
+    manual_cost = sum(r.get('cost_usd', 0) for r in manual_runs)
+    actual_saved = claude_eq - cost - manual_cost
+    warns = sum(r.get('warn_count', 0) for r in delegate_runs)
+    sr_f = sum(r.get('search_replace_fails', 0) for r in delegate_runs)
+    syntax = sum(r.get('syntax_errors', 0) for r in delegate_runs)
+    timeouts = sum(1 for r in delegate_runs if r.get('timed_out'))
+    wrote_nothing = sum(1 for r in delegate_runs if r.get('wrote_nothing'))
+    avg_dur = sum(r.get('duration_secs', 0) for r in delegate_runs) / total if total else 0
+    saved_pct = f"  ({int(actual_saved / claude_eq * 100)}% cheaper than Claude)" if claude_eq > 0 and actual_saved > 0 else ""
 
     print(f"\n{'=' * 56}")
     print(f"  DELEGATE REPORT{date_range(runs)}")
@@ -110,19 +118,27 @@ def show_overview(runs):
     print(f"  Tokens total  : {tokens:,}")
     print(f"  Delegate cost : {fmt_cost(cost)}")
     print(f"  Claude equiv  : {fmt_cost(claude_eq)}")
-    print(f"  Saved         : {fmt_cost(saved)}{saved_pct}")
+    if manual_runs:
+        manual_lines = sum(r.get('lines_added', 0) for r in manual_runs)
+        print(f"  Manual (Claude): {len(manual_runs)} intervention(s)  ~{manual_lines} lines  est. {fmt_cost(manual_cost)}")
+        print(f"  Actual saved  : {fmt_cost(actual_saved)}{saved_pct}  (after manual cost)")
+    else:
+        print(f"  Saved         : {fmt_cost(actual_saved)}{saved_pct}")
     if warns or sr_f or syntax or wrote_nothing:
         print(f"  --- bugs/warns ---")
-        if warns:        print(f"  Warnings      : {warns}")
-        if sr_f:         print(f"  SR failures   : {sr_f}")
-        if syntax:       print(f"  Syntax errors : {syntax}")
+        if warns:         print(f"  Warnings      : {warns}")
+        if sr_f:          print(f"  SR failures   : {sr_f}")
+        if syntax:        print(f"  Syntax errors : {syntax}")
         if wrote_nothing: print(f"  Wrote nothing : {wrote_nothing}  (prompt too vague or task already done)")
     print()
 
 
 def show_by_model(runs):
+    delegate_runs = [r for r in runs if not is_manual(r)]
+    manual_runs   = [r for r in runs if is_manual(r)]
+
     by_model = defaultdict(list)
-    for r in runs:
+    for r in delegate_runs:
         by_model[r.get('model', 'unknown')].append(r)
 
     print("BY MODEL")
@@ -139,6 +155,15 @@ def show_by_model(runs):
             f"{tokens:,}", fmt_cost(c), fmt_cost(claude_eq), saved_pct,
             sum(r.get('warn_count', 0) for r in mrs),
             sum(r.get('search_replace_fails', 0) for r in mrs),
+        ])
+    if manual_runs:
+        tokens = sum(r.get('tokens_total', 0) for r in manual_runs)
+        c = sum(r.get('cost_usd', 0) for r in manual_runs)
+        lines = sum(r.get('lines_added', 0) for r in manual_runs)
+        rows.append([
+            "claude-manual", len(manual_runs), " — ",
+            f"~{tokens:,}", f"~{fmt_cost(c)}", " — ", " — ",
+            f"~{lines}L", "(est.)",
         ])
     print_table(headers, rows)
     print()
