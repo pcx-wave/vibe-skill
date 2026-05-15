@@ -3,6 +3,7 @@ name: vibe
 description: >
   Delegate a coding task to Mistral Vibe and supervise the result via git diff.
   Trigger: /vibe <instruction>. Claude orchestrates, Vibe codes.
+  Also handles /vibe-report [--since N] [--project NAME] [--fails] — token/cost/failure report.
 license: MIT
 user-invocable: true
 allowed-tools:
@@ -12,6 +13,21 @@ allowed-tools:
 ---
 
 # Vibe Orchestrator
+
+## /vibe-report
+
+If the user invokes `/vibe-report`, run `~/tools/delegate-report` with any flags
+extracted from the arguments, display output verbatim, and stop.
+
+| User says | Flag |
+|-----------|------|
+| "last 7 days", "7d" | `--since 7` |
+| "last 30 days", "30d" | `--since 30` |
+| "project foo" | `--project foo` |
+| "only failures", "fails", "bugs" | `--fails` |
+| (nothing) | (no flags — full report) |
+
+---
 
 When the user invokes `/vibe <instruction>`, Claude delegates the implementation
 to Mistral Vibe via its programmatic mode, supervises in real time, and reports.

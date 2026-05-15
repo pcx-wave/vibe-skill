@@ -45,7 +45,7 @@ Summary:
 ## Installation
 
 ```bash
-git clone https://github.com/pcx-wave/vibe-skill.git && cd vibe-skill && mkdir -p ~/tools && ln -sf "$(pwd)/tools/vibe-delegate" ~/tools/vibe-delegate && ln -sf "$(pwd)/tools/delegate-report" ~/tools/delegate-report && chmod +x ~/tools/vibe-delegate ~/tools/delegate-report && mkdir -p ~/.claude/skills/vibe ~/.claude/skills/vibe-report && ln -sf "$(pwd)/SKILL.md" ~/.claude/skills/vibe/SKILL.md && ln -sf "$(pwd)/SKILL.md" ~/.claude/skills/vibe-report/SKILL.md
+git clone https://github.com/pcx-wave/vibe-skill.git && cd vibe-skill && mkdir -p ~/tools ~/.claude/skills/vibe && ln -sf "$(pwd)/tools/vibe-delegate" ~/tools/vibe-delegate && ln -sf "$(pwd)/tools/delegate-report" ~/tools/delegate-report && chmod +x ~/tools/vibe-delegate ~/tools/delegate-report && ln -sf "$(pwd)/SKILL.md" ~/.claude/skills/vibe/SKILL.md
 ```
 
 ### Step-by-step
@@ -55,21 +55,17 @@ git clone https://github.com/pcx-wave/vibe-skill.git && cd vibe-skill && mkdir -
 git clone https://github.com/pcx-wave/vibe-skill.git
 cd vibe-skill
 
-# 2. Install the delegate and report scripts (symlinks — stay in sync with git pull)
+# 2. Install the scripts (symlinks — stay in sync with git pull)
 mkdir -p ~/tools
 ln -sf "$(pwd)/tools/vibe-delegate" ~/tools/vibe-delegate
 ln -sf "$(pwd)/tools/delegate-report" ~/tools/delegate-report
 chmod +x ~/tools/vibe-delegate ~/tools/delegate-report
 
-# 3. Install the skills for Claude Code (symlinks — stay in sync with git pull)
+# 3. Install the skill for Claude Code (one file, two commands: /vibe and /vibe-report)
 mkdir -p ~/.claude/skills/vibe
 ln -sf "$(pwd)/SKILL.md" ~/.claude/skills/vibe/SKILL.md
 
-mkdir -p ~/.claude/skills/vibe-report
-ln -sf "$(pwd)/SKILL.md" ~/.claude/skills/vibe-report/SKILL.md
-
-# 4. Edit the "Known projects" table in ~/.claude/skills/vibe/SKILL.md
-#    to list your own projects with their paths.
+# 4. Edit the "Known projects" table in SKILL.md to list your projects.
 ```
 
 Verify with `~/tools/vibe-delegate /tmp "Say hello in one sentence." 3`
