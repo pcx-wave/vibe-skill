@@ -17,7 +17,8 @@
 #   Appends one JSONL entry to ~/.local/share/delegate-runs.jsonl after each run.
 #   Fields: ts, delegate, project, prompt_words, agent, max_turns, timeout_secs,
 #           exit_code, timed_out, tool_calls, files_changed, syntax_errors,
-#           duration_secs, tokens_in, tokens_out, tokens_total, cost_usd, model.
+#           duration_secs, tokens_in, tokens_out, tokens_total, cost_usd, model,
+#           warn_count, search_replace_fails, cost_claude_eq, wrote_nothing.
 
 WORKDIR="${1:?Usage: vibe-delegate <workdir> <prompt> [max-turns] [agent] [timeout-secs]}"
 PROMPT="${2:?Prompt required}"
@@ -89,6 +90,8 @@ import sys, json, re, os
 
 ANSI_RE = re.compile(r'\x1b\[[0-9;]*[mABCDEFGHJKSTfhilmnprsu]|\x1b\([AB]|\x0f|\x0e')
 tools_called = 0
+warn_count = 0
+sr_fails = 0
 writes = []
 def clean(line):
     line = line.replace('\r', '')
@@ -130,8 +133,11 @@ for raw in sys.stdin:
             print(f'  [read]  {first_line[5:].strip()}', flush=True)
         elif 'search_replace' in tool_name.lower() or 'SEARCH' in content:
             status = 'FAIL' if 'failed' in content.lower() else 'OK'
+            if status == 'FAIL':
+                sr_fails += 1
             print(f'  [tool]  search_replace [{status}] {first_line[:80]}', flush=True)
         elif first_line.startswith('error') or 'Error' in first_line or 'failed' in first_line.lower():
+            warn_count += 1
             print(f'  [WARN]  {first_line[:120]}', flush=True)
         elif 'matches:' in first_line or 'grep' in tool_name.lower():
             print(f'  [tool]  matches: {first_line[:100]}', flush=True)
@@ -141,14 +147,14 @@ for raw in sys.stdin:
             snippet = (first_line or content)[:100]
             print(f'  [tool]  {snippet}', flush=True)
 
-print(f'Tool calls: {tools_called}')
+print(f'Tool calls: {tools_called}  |  warns: {warn_count}  |  sr_fails: {sr_fails}')
 
-# Write partial stats (tool_calls) so the token block can merge into it.
+# Write partial stats so the token block can merge into it.
 _sf = os.environ.get('DELEGATE_STATS_FILE', '')
 if _sf:
     try:
         with open(_sf, 'w') as _f:
-            json.dump({'tool_calls': tools_called}, _f)
+            json.dump({'tool_calls': tools_called, 'warn_count': warn_count, 'search_replace_fails': sr_fails}, _f)
     except Exception:
         pass
 "
@@ -171,6 +177,8 @@ try:
     cost = stats.get('session_cost', 0)
     session_total = stats.get('session_total_llm_tokens', 0)
     claude_cost = (prompt * 3.0 + completion * 15.0) / 1_000_000
+    model_name = data.get('config', {}).get('active_model', 'mistral')
+    print(f'Model               : {model_name}')
     print(f'Mistral tokens (real): {total:,}  ({prompt:,} prompt + {completion:,} completion)  |  cost ~\${cost_turn:.4f}')
     print(f'Claude Sonnet 4.6 eq: same tokens would cost ~\${claude_cost:.4f}  (ratio x{claude_cost/cost_turn:.1f})' if cost_turn > 0 else f'Claude Sonnet 4.6 eq: ~\${claude_cost:.4f}')
     print(f'Session total so far : {session_total:,} tokens  |  session cost ~\${cost:.4f}')
@@ -186,7 +194,7 @@ try:
             'tokens_out':   completion,
             'tokens_total': total,
             'cost_usd':     round(cost_turn, 6),
-            'model':        'mistral',
+            'model':        model_name,
         })
         with open(sf, 'w') as wf:
             json.dump(existing, wf)
@@ -305,17 +313,36 @@ entry = {
     'timeout_secs':  int(os.environ.get('DELEGATE_TIMEOUT', 0) or 0),
     'exit_code':     int(os.environ.get('DELEGATE_EXIT', 0) or 0),
     'timed_out':     os.environ.get('DELEGATE_EXIT') == '124',
-    'files_changed': int(os.environ.get('DELEGATE_FILES_CHANGED', 0) or 0),
-    'syntax_errors': int(os.environ.get('DELEGATE_SYNTAX_ERRORS', 0) or 0),
-    'duration_secs': duration,
+    'files_changed':       int(os.environ.get('DELEGATE_FILES_CHANGED', 0) or 0),
+    'syntax_errors':       int(os.environ.get('DELEGATE_SYNTAX_ERRORS', 0) or 0),
+    'duration_secs':       duration,
+    'warn_count':          stats.get('warn_count', 0),
+    'search_replace_fails': stats.get('search_replace_fails', 0),
 }
 entry.update(stats)
+
+# Compute Claude Sonnet 4.6 equivalent cost for savings tracking.
+ti = entry.get('tokens_in', 0)
+to = entry.get('tokens_out', 0)
+entry['cost_claude_eq'] = round((ti * 3.0 + to * 15.0) / 1_000_000, 6)
+
+# True when Vibe ran tool calls but wrote nothing (vague prompt or task already done).
+# Excluded for read-only agents that intentionally never write files.
+_readonly_agents = ('code-reviewer', 'code-architect', 'planner')
+entry['wrote_nothing'] = (
+    entry.get('files_changed', 0) == 0
+    and entry.get('tool_calls', 0) >= 3
+    and entry.get('exit_code', 0) == 0
+    and entry.get('agent', 'default') not in _readonly_agents
+)
 
 with open(LOG, 'a') as f:
     f.write(json.dumps(entry) + '\n')
 
 tok = entry.get('tokens_total', '?')
-print(f'[log] → {LOG}  ({tok} tokens, exit {entry["exit_code"]}, {duration}s)')
+saved = entry['cost_claude_eq'] - entry.get('cost_usd', 0)
+saved_str = f', saved ~${saved:.4f} vs Claude' if saved > 0 else ''
+print(f'[log] → {LOG}  ({tok} tokens, exit {entry["exit_code"]}, {duration}s{saved_str})')
 PYLOG
 
 exit $VIBE_EXIT

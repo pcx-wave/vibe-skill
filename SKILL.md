@@ -329,23 +329,35 @@ Every run appends one JSON entry to `~/.local/share/delegate-runs.jsonl`.
 | `tokens_in`     | int     | Prompt tokens (from Mistral session log)             |
 | `tokens_out`    | int     | Completion tokens                                    |
 | `tokens_total`  | int     | Total tokens                                         |
-| `cost_usd`      | float   | Estimated cost in USD                                |
-| `model`         | string  | `"mistral"`                                          |
+| `cost_usd`            | float   | Estimated delegate cost in USD                       |
+| `cost_claude_eq`      | float   | Claude Sonnet 4.6 equivalent cost for same tokens    |
+| `model`               | string  | Active model alias from `config.active_model` (e.g. `"deepseek-flash"`, `"mistral-medium"`) |
+| `warn_count`          | int     | Number of `[WARN]` events during the run             |
+| `search_replace_fails`| int     | Number of `search_replace [FAIL]` events             |
+| `wrote_nothing`       | bool    | `true` if Vibe ran ≥3 tool calls but changed 0 files |
 
-**Useful queries:**
+**Report script — `~/tools/delegate-report`:**
+
 ```bash
-# All recent runs
-cat ~/.local/share/delegate-runs.jsonl | python3 -m json.tool | less
+~/tools/delegate-report                  # full report (all time)
+~/tools/delegate-report --since 7        # last 7 days
+~/tools/delegate-report --project myapp  # filter by project
+~/tools/delegate-report --fails          # failures and issues only
+```
 
+Or via Claude Code: `/vibe-report [args]`
+
+**Raw jq queries:**
+```bash
 # Success rate
-jq -r '[.exit_code] | @tsv' ~/.local/share/delegate-runs.jsonl | sort | uniq -c
+jq -r '.exit_code' ~/.local/share/delegate-runs.jsonl | sort | uniq -c
 
-# Timed-out runs
-jq 'select(.timed_out == true)' ~/.local/share/delegate-runs.jsonl
+# Total cost vs Claude equivalent
+jq -r '[.cost_usd, .cost_claude_eq] | @tsv' ~/.local/share/delegate-runs.jsonl \
+  | awk '{c+=$1; e+=$2} END {printf "Spent: $%.4f  Claude eq: $%.4f  Saved: $%.4f\n", c, e, e-c}'
 
-# Total cost
-jq -r '.cost_usd' ~/.local/share/delegate-runs.jsonl \
-  | awk '{sum+=$1} END {printf "Total: $%.4f\n", sum}'
+# Runs with search_replace failures
+jq 'select(.search_replace_fails > 0)' ~/.local/share/delegate-runs.jsonl
 ```
 
 ---
