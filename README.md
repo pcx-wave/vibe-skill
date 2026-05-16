@@ -6,7 +6,7 @@
 
 **Claude orchestrates. Vibe does the heavy lifting. You review the diff, save tokens, costs and avoid hitting limits!**
 
-Claude sees only ~500–1500 tokens per run regardless of how many file reads Vibe performs internally — massive savings on exploratory and implementation tasks. And because Vibe runs in its own process, your Claude session context stays clean: no risk of hitting the context window on long coding sessions.
+Claude sees only ~500–1500 tokens per run regardless of how many file reads Vibe performs internally — massive savings on exploratory and implementation tasks.
 
 Note that Vibe works natively with Mistral models which are capable and significantly cheaper than Claude, but Vibe can also be configured to use any other provider/model instead. Eg you can use a deepseek model with vibe tooling. 
 
@@ -30,22 +30,6 @@ Summary:
 | Complex multi-file refactor (12,000 tokens) | ~$0.058 | ~$0.029 | ~$0.002 |
 
 > Costs based on official pricing (May 2026): Claude $3/$15 per M tokens, Mistral Medium 3.5 $1.50/$7.50, DeepSeek V4 Flash $0.14/$0.28. Assumes ~85% input / 15% output, typical for coding tasks. Claude orchestration overhead: ~500 tokens per run (negligible).
-
-**Reliability — observed data (64 real runs, not a synthetic benchmark):**
-
-| Model | Runs | Effective completion | Avg tok/run | Tokens in | Tokens out | Total tokens | Hard failures | Warnings | SR failures | Wrote nothing |
-|-------|------|---------------------|-------------|-----------|------------|-------------|--------------|----------|-------------|---------------|
-| Mistral Medium 3.5 | 48 | 94% | 19,772 | 937,577 | 11,501 | 949,078 | 2 | 0 | 0 | — |
-| DeepSeek V4 Flash | 16 | 56% | 18,699 | 295,858 | 3,324 | 299,182 | 0 | 10 | 2 | 5 |
-
-> Effective completion = runs with no hard failure, no syntax error, no SR failure, and at least one file changed. This is a **per-run metric, not a per-task metric**: in practice, Claude relaunches with a corrected prompt after most failures, so the actual task completion rate is higher. DeepSeek's 56% reflects a single day of testing on prompts that had already proven reliable with Mistral — the lower rate is a model behaviour difference, not a prompting issue. In nearly every case a follow-up run succeeded within minutes. Cache hit tokens are not tracked separately by Vibe's session logger.
-
-- **Hard failure** (`exit_err`): Vibe crashed or verification failed — diff may be partial
-- **Warning**: Vibe signalled an internal error mid-run but continued
-- **SR failure**: `search_replace` match failed — file not modified, no silent data loss
-- **Wrote nothing**: Vibe ran tool calls but produced no file changes — prompt too vague or task already done
-
-Trade-off in plain terms: Mistral is quieter but fails hard occasionally; DeepSeek never crashes but generates more noise and requires tighter prompts. On files actively being edited across multiple runs, DeepSeek accumulates more SR failures. Sample size is small — your own `/vibe-report` will give you a more accurate picture over time.
 
 **Context window protection** — On long coding sessions, every file read, function body, and debug loop burns Claude's context. Delegating to Vibe keeps that budget free. Claude enters the task, hands off, and comes back only to review the result — no context bleed from Vibe's internal turns.
 
@@ -87,7 +71,6 @@ chmod +x ~/tools/vibe-delegate ~/tools/delegate-report
 mkdir -p ~/.claude/skills/vibe
 ln -sf "$(pwd)/SKILL.md" ~/.claude/skills/vibe/SKILL.md
 
-# 4. Edit the "Known projects" table in SKILL.md to list your projects.
 ```
 
 Verify with `~/tools/vibe-delegate /tmp "Say hello in one sentence." 3`
@@ -216,22 +199,6 @@ The `script ... /dev/null` trick allocates a pseudo-TTY on both Linux and macOS;
 
 ---
 
-## Token economics
-
-Vibe's internal turns (file reads, search/replace attempts) consume **Mistral tokens**, not Claude tokens.
-For a task with 6 reads of an 800-line file: ~4800 tokens on Mistral's side, effectively 0 on Claude's.
-Real advantage on exploratory/implementation tasks. 
-
-NOTE : Vibe natively works with Mistral models, but that can be changed to any other model while benefitting from Vibe tooling. You can configure your LLM provider/model in your config.toml or yaml file in your .vibe folder.
-
----
-
-## Customization
-
-Edit `~/.claude/skills/vibe/SKILL.md`: adjust **Known projects**, **Max turns**, and **Agents**.
-
----
-
 ## Examples
 
 - `examples/good-prompts.md` — prompt patterns that reliably work
@@ -245,43 +212,7 @@ A parallel delegate using **Gemini CLI** is available at [pcx-wave/gemini-skill]
 
 ## Reporting
 
-Every run is logged to `~/.local/share/delegate-runs.jsonl` with tokens, cost, model, warnings, and failure details. Use the included report script or the `/vibe-report` skill:
-
-```bash
-~/tools/delegate-report                  # full report (all time)
-~/tools/delegate-report --since 7        # last 7 days
-~/tools/delegate-report --project myapp  # filter by project
-~/tools/delegate-report --fails          # failures and issues only
-```
-
-Or from Claude Code: `/vibe-report [args]`
-
-Sample `--fails` output:
-
-```
-FAILURES BY MODEL  (benchmark)
-Model           Fails  Timeout  exit_err  syntax  sr_fail  empty  warn
---------------  -----  -------  --------  ------  -------  -----  ----
-deepseek-flash  2      .        1         1       .        .      .
-
-FAILURES / ISSUES  (last 2 of 2)
-Date        Project   Model           Type      Exit  Warns  SR  Syn  Dur
-----------  --------  --------------  --------  ----  -----  --  ---  ---
-2026-05-13  myapp     deepseek-flash  syntax    0     .      .   1    23s
-2026-05-12  myapp     deepseek-flash  exit_err  1     .      .   .    34s
-
-LEGEND
-  syntax      Vibe wrote syntactically invalid code
-             → Run py_compile/node --check; fix manually before committing
-  exit_err    Vibe verification failed or crashed
-             → Read git diff; understand partial work before relaunching
-```
-
-Failure types: `timeout` · `exit_err` · `syntax` · `sr_fail` · `empty` · `warn`
-
-## Cross-delegate benchmarking
-
-vibe-skill and gemini-skill share the same `~/.local/share/delegate-runs.jsonl` schema. `delegate-report` groups results by model automatically, so you can compare cost, success rate, and failure patterns across `deepseek-flash`, `mistral-medium`, Gemini, etc. in one command.
+Every run is logged to `~/.local/share/delegate-runs.jsonl` with tokens, cost, model, and failure details. Query it with `~/tools/delegate-report [--since N] [--project NAME] [--fails]` or from Claude Code: `/vibe-report [args]`.
 
 ---
 

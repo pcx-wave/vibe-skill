@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pm2 list *)",
+      "Bash(pm2 logs *)",
+      "Bash(pm2 show *)",
+      "Bash(systemctl --user status *)",
+      "Bash(systemctl status *)",
+      "Bash(systemctl --user list-units *)",
+      "Bash(~/tools/delegate-report *)"
+    ]
+  }
+}
