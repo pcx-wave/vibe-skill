@@ -51,7 +51,7 @@ Summary:
 ## Installation
 
 ```bash
-git clone https://github.com/pcx-wave/vibe-skill.git && cd vibe-skill && mkdir -p ~/tools ~/.claude/skills/vibe ~/.claude/skills/vibeon ~/.claude/skills/vibeoff ~/.claude/skills/vibestatus && ln -sf "$(pwd)/tools/vibe-delegate" ~/tools/vibe-delegate && ln -sf "$(pwd)/tools/delegate-report" ~/tools/delegate-report && chmod +x ~/tools/vibe-delegate ~/tools/delegate-report && ln -sf "$(pwd)/SKILL.md" ~/.claude/skills/vibe/SKILL.md && ln -sf "$(pwd)/VIBEON.md" ~/.claude/skills/vibeon/SKILL.md && ln -sf "$(pwd)/VIBEOFF.md" ~/.claude/skills/vibeoff/SKILL.md && ln -sf "$(pwd)/VIBESTATUS.md" ~/.claude/skills/vibestatus/SKILL.md
+git clone https://github.com/pcx-wave/vibe-skill.git && cd vibe-skill && mkdir -p ~/tools ~/.claude/skills/vibe ~/.claude/skills/vibeon ~/.claude/skills/vibeoff ~/.claude/skills/vibestatus ~/.claude/skills/geminion ~/.claude/skills/geminioff ~/.claude/skills/geministatus && ln -sf "$(pwd)/tools/vibe-delegate" ~/tools/vibe-delegate && ln -sf "$(pwd)/tools/delegate-report" ~/tools/delegate-report && chmod +x ~/tools/vibe-delegate ~/tools/delegate-report && ln -sf "$(pwd)/SKILL.md" ~/.claude/skills/vibe/SKILL.md && ln -sf "$(pwd)/VIBEON.md" ~/.claude/skills/vibeon/SKILL.md && ln -sf "$(pwd)/VIBEOFF.md" ~/.claude/skills/vibeoff/SKILL.md && ln -sf "$(pwd)/VIBESTATUS.md" ~/.claude/skills/vibestatus/SKILL.md && ln -sf "$(pwd)/GEMINION.md" ~/.claude/skills/geminion/SKILL.md && ln -sf "$(pwd)/GEMINIOFF.md" ~/.claude/skills/geminioff/SKILL.md && ln -sf "$(pwd)/GEMINISTATUS.md" ~/.claude/skills/geministatus/SKILL.md
 ```
 
 ### Step-by-step
@@ -68,11 +68,15 @@ ln -sf "$(pwd)/tools/delegate-report" ~/tools/delegate-report
 chmod +x ~/tools/vibe-delegate ~/tools/delegate-report
 
 # 3. Install the skills for Claude Code
-mkdir -p ~/.claude/skills/vibe ~/.claude/skills/vibeon ~/.claude/skills/vibeoff ~/.claude/skills/vibestatus
+mkdir -p ~/.claude/skills/vibe ~/.claude/skills/vibeon ~/.claude/skills/vibeoff ~/.claude/skills/vibestatus \
+         ~/.claude/skills/geminion ~/.claude/skills/geminioff ~/.claude/skills/geministatus
 ln -sf "$(pwd)/SKILL.md" ~/.claude/skills/vibe/SKILL.md
 ln -sf "$(pwd)/VIBEON.md" ~/.claude/skills/vibeon/SKILL.md
 ln -sf "$(pwd)/VIBEOFF.md" ~/.claude/skills/vibeoff/SKILL.md
 ln -sf "$(pwd)/VIBESTATUS.md" ~/.claude/skills/vibestatus/SKILL.md
+ln -sf "$(pwd)/GEMINION.md" ~/.claude/skills/geminion/SKILL.md
+ln -sf "$(pwd)/GEMINIOFF.md" ~/.claude/skills/geminioff/SKILL.md
+ln -sf "$(pwd)/GEMINISTATUS.md" ~/.claude/skills/geministatus/SKILL.md
 
 # 4. (Optional) Enable auto-mode — Claude delegates all code tasks automatically
 #    without requiring /vibe each time. Toggle with /vibeon and /vibeoff.
