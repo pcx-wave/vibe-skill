@@ -67,9 +67,22 @@ ln -sf "$(pwd)/tools/vibe-delegate" ~/tools/vibe-delegate
 ln -sf "$(pwd)/tools/delegate-report" ~/tools/delegate-report
 chmod +x ~/tools/vibe-delegate ~/tools/delegate-report
 
-# 3. Install the skill for Claude Code (one file, two commands: /vibe and /vibe-report)
+# 3. Install the skill for Claude Code
 mkdir -p ~/.claude/skills/vibe
 ln -sf "$(pwd)/SKILL.md" ~/.claude/skills/vibe/SKILL.md
+
+# 4. (Optional) Enable auto-mode — Claude delegates all code tasks automatically
+#    without requiring /vibe each time. Toggle with /vibeon and /vibeoff.
+grep -q "vibe auto-mode" ~/.claude/CLAUDE.md 2>/dev/null || cat >> ~/.claude/CLAUDE.md << 'EOF'
+
+# vibe auto-mode
+At the start of every user request that involves writing, editing, or fixing code:
+1. Run `test -f ~/.local/share/vibe-auto.flag` (silent, no output to user).
+2. If the flag exists → automatically invoke the `vibe` skill exactly as if the user had typed `/vibe <their full instruction>`. Do NOT ask first, do NOT explain — just delegate.
+3. If the flag is absent → proceed normally.
+
+The flag is toggled by `/vibeon` and `/vibeoff`.
+EOF
 
 ```
 
