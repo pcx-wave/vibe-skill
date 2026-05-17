@@ -323,6 +323,13 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 | Truncated prompt | Special chars in inline prompt | Script uses temp file — should be fixed |
 | Wrote a Python helper just to replace code | Misdiagnosed search_replace limit — plain Python code works fine | Use search_replace directly for ASCII code; write_file only if the new content is too long for the prompt |
 | Passed code via bash heredoc | Nested quotes break in Vibe's bash execution | Never put source code in a heredoc; use write_file tool instead |
+| **Merge conflict markers left in code** | Vibe uses search_replace on files with prior edits, leaves `=======` markers | After any run touching edited files, grep: `grep -n "=======" file`. Fix with `python3 str.replace()` |
+| **D3 `source`/`target` field conflict** | Vibe names edge fields `source`/`target` which D3 forceLink hijacks internally | Use `from`/`to` for custom edge fields. Map explicitly: `edges.map(e => ({...e, source: e.from, target: e.to}))` before passing to forceLink |
+| **D3 tick handler overwritten** | Vibe registers custom force as `simulation.on('tick', fn)` — D3 overwrites previous listener with same name | Use `.force('name', fn)` not tick handlers for custom forces |
+| **Function defined but never called** | Vibe writes helper functions (e.g. `renderX()`) but omits the call in init sequence | After every frontend run, grep new functions and verify they're called: `grep -n "^function " file.html` |
+| **Large file timeout (>300 lines)** | Vibe hits the 360s wall generating a large single file | Break into sub-tasks: CSS → HTML structure → JS logic. Never ask for >200 lines in one prompt |
+| **PM2 env vars not loading** | `pm2 start "bash -c 'source ~/.vibe/.env && ...'"` — quotes in .env break export | Use a wrapper script: `printf '#!/bin/bash\nset -a; source ~/.vibe/.env; set +a\npython3 ...\n' > /tmp/run.sh && pm2 start /tmp/run.sh` |
+| **LLM batch fallback flood** | Large batches (50 items) return wrong count → entire batch falls back to catch-all | Use batches ≤20 items. On count mismatch: pad/truncate instead of full fallback |
 
 **If exit non-zero:** do not relaunch immediately. Read the diff, understand what was done, fix the prompt.
 
