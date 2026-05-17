@@ -23,9 +23,13 @@ requiring `/vibe` each time.
 |---------|--------|
 | `/vibeon` | `touch ~/.local/share/vibe-auto.flag` → confirm "Auto-vibe ON" |
 | `/vibeoff` | `rm -f ~/.local/share/vibe-auto.flag` → confirm "Auto-vibe OFF" |
-| `/vibestatus` | check `~/.local/share/vibe-auto.flag` → report ON or OFF |
+| `/vibestatus` | report auto-mode (ON/OFF) **and** active model override |
 
-Run the bash command, print one confirmation line, and stop.
+For `/vibestatus`, run both checks and print two lines:
+```
+Auto-vibe: ON | OFF
+Model: <alias>  (override)  OR  Model: deepseek-flash  (config default)
+```
 
 ---
 
@@ -44,7 +48,7 @@ extracted from the arguments, display output verbatim, and stop.
 
 ---
 
-## /vibe-model-pick | /vibe-model-clear | /vibe-model-status
+## /vibe-model-pick | /vibe-model-clear
 
 Override the Vibe model for all subsequent delegations without touching `~/.vibe/config.toml`.
 Works via `VIBE_ACTIVE_MODEL` env var, which Vibe respects over the config file.
@@ -53,7 +57,6 @@ Works via `VIBE_ACTIVE_MODEL` env var, which Vibe respects over the config file.
 |---------|--------|
 | `/vibe-model-pick <alias>` | `echo <alias> > ~/.local/share/vibe-model.flag` → confirm |
 | `/vibe-model-clear` | `rm -f ~/.local/share/vibe-model.flag` → confirm "back to config default" |
-| `/vibe-model-status` | read the flag → report active override or "none (config default)" |
 
 **Available aliases** (from `~/.vibe/config.toml`):
 
