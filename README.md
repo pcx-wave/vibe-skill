@@ -51,7 +51,7 @@ Summary:
 ## Installation
 
 ```bash
-git clone https://github.com/pcx-wave/vibe-skill.git && cd vibe-skill && mkdir -p ~/tools ~/.claude/skills/vibe ~/.claude/skills/vibeon ~/.claude/skills/vibeoff ~/.claude/skills/vibestatus ~/.claude/skills/geminion ~/.claude/skills/geminioff ~/.claude/skills/geministatus && ln -sf "$(pwd)/tools/vibe-delegate" ~/tools/vibe-delegate && ln -sf "$(pwd)/tools/delegate-report" ~/tools/delegate-report && chmod +x ~/tools/vibe-delegate ~/tools/delegate-report && ln -sf "$(pwd)/SKILL.md" ~/.claude/skills/vibe/SKILL.md && ln -sf "$(pwd)/VIBEON.md" ~/.claude/skills/vibeon/SKILL.md && ln -sf "$(pwd)/VIBEOFF.md" ~/.claude/skills/vibeoff/SKILL.md && ln -sf "$(pwd)/VIBESTATUS.md" ~/.claude/skills/vibestatus/SKILL.md && ln -sf "$(pwd)/GEMINION.md" ~/.claude/skills/geminion/SKILL.md && ln -sf "$(pwd)/GEMINIOFF.md" ~/.claude/skills/geminioff/SKILL.md && ln -sf "$(pwd)/GEMINISTATUS.md" ~/.claude/skills/geministatus/SKILL.md
+git clone https://github.com/pcx-wave/vibe-skill.git && cd vibe-skill && mkdir -p ~/tools ~/.claude/skills/vibe ~/.claude/skills/vibeon ~/.claude/skills/vibeoff ~/.claude/skills/vibestatus ~/.claude/skills/vibe-model-pick ~/.claude/skills/vibe-model-clear ~/.claude/skills/geminion ~/.claude/skills/geminioff ~/.claude/skills/geministatus && ln -sf "$(pwd)/tools/vibe-delegate" ~/tools/vibe-delegate && ln -sf "$(pwd)/tools/delegate-report" ~/tools/delegate-report && chmod +x ~/tools/vibe-delegate ~/tools/delegate-report && ln -sf "$(pwd)/SKILL.md" ~/.claude/skills/vibe/SKILL.md && ln -sf "$(pwd)/VIBEON.md" ~/.claude/skills/vibeon/SKILL.md && ln -sf "$(pwd)/VIBEOFF.md" ~/.claude/skills/vibeoff/SKILL.md && ln -sf "$(pwd)/VIBESTATUS.md" ~/.claude/skills/vibestatus/SKILL.md && ln -sf "$(pwd)/VIBE-MODEL-PICK.md" ~/.claude/skills/vibe-model-pick/SKILL.md && ln -sf "$(pwd)/VIBE-MODEL-CLEAR.md" ~/.claude/skills/vibe-model-clear/SKILL.md && ln -sf "$(pwd)/GEMINION.md" ~/.claude/skills/geminion/SKILL.md && ln -sf "$(pwd)/GEMINIOFF.md" ~/.claude/skills/geminioff/SKILL.md && ln -sf "$(pwd)/GEMINISTATUS.md" ~/.claude/skills/geministatus/SKILL.md
 ```
 
 ### Step-by-step
@@ -69,11 +69,14 @@ chmod +x ~/tools/vibe-delegate ~/tools/delegate-report
 
 # 3. Install the skills for Claude Code
 mkdir -p ~/.claude/skills/vibe ~/.claude/skills/vibeon ~/.claude/skills/vibeoff ~/.claude/skills/vibestatus \
+         ~/.claude/skills/vibe-model-pick ~/.claude/skills/vibe-model-clear \
          ~/.claude/skills/geminion ~/.claude/skills/geminioff ~/.claude/skills/geministatus
 ln -sf "$(pwd)/SKILL.md" ~/.claude/skills/vibe/SKILL.md
 ln -sf "$(pwd)/VIBEON.md" ~/.claude/skills/vibeon/SKILL.md
 ln -sf "$(pwd)/VIBEOFF.md" ~/.claude/skills/vibeoff/SKILL.md
 ln -sf "$(pwd)/VIBESTATUS.md" ~/.claude/skills/vibestatus/SKILL.md
+ln -sf "$(pwd)/VIBE-MODEL-PICK.md" ~/.claude/skills/vibe-model-pick/SKILL.md
+ln -sf "$(pwd)/VIBE-MODEL-CLEAR.md" ~/.claude/skills/vibe-model-clear/SKILL.md
 ln -sf "$(pwd)/GEMINION.md" ~/.claude/skills/geminion/SKILL.md
 ln -sf "$(pwd)/GEMINIOFF.md" ~/.claude/skills/geminioff/SKILL.md
 ln -sf "$(pwd)/GEMINISTATUS.md" ~/.claude/skills/geministatus/SKILL.md
@@ -132,6 +135,19 @@ In a Claude Code session:
 
 Claude decomposes the task, writes the Vibe prompt, supervises execution, and reports the diff.
 
+### Model selection
+
+By default, Vibe uses whatever `active_model` is set in `~/.vibe/config.toml`. You can override it per-session without touching that file:
+
+```
+/vibe-model-pick              — interactive menu built from your config.toml models
+/vibe-model-pick devstral-small  — switch directly by alias
+/vibe-model-clear             — remove the override, return to config default
+/vibestatus                   — shows both auto-mode state and active model override
+```
+
+The override is stored in `~/.local/share/vibe-model.flag` and is picked up by `vibe-delegate` on every run. It persists across sessions until you clear it.
+
 ### Vibe-auto mode
 
 For frictionless delegation, enable auto-mode once in your Claude Code session:
@@ -139,7 +155,7 @@ For frictionless delegation, enable auto-mode once in your Claude Code session:
 ```
 /vibeon      — every code request is automatically delegated to Vibe, no /vibe prefix needed
 /vibeoff     — return to normal Claude behaviour
-/vibestatus  — check whether auto-mode is currently ON or OFF
+/vibestatus  — auto-mode state + active model override
 ```
 
 With `vibeon` active, just talk to Claude normally:
@@ -162,6 +178,7 @@ Sample output from a real run:
 === VIBE START ===
 Workdir : /path/to/project
 Agent   : default
+Model   : deepseek-flash  (config default)
 Turns   : 10
 Timeout : 180s
 Prompt  : Stack: Python/Flask. File: app.py ...
