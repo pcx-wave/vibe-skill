@@ -44,6 +44,30 @@ extracted from the arguments, display output verbatim, and stop.
 
 ---
 
+## /vibe-model-pick | /vibe-model-clear | /vibe-model-status
+
+Override the Vibe model for all subsequent delegations without touching `~/.vibe/config.toml`.
+Works via `VIBE_ACTIVE_MODEL` env var, which Vibe respects over the config file.
+
+| Command | Action |
+|---------|--------|
+| `/vibe-model-pick <alias>` | `echo <alias> > ~/.local/share/vibe-model.flag` → confirm |
+| `/vibe-model-clear` | `rm -f ~/.local/share/vibe-model.flag` → confirm "back to config default" |
+| `/vibe-model-status` | read the flag → report active override or "none (config default)" |
+
+**Available aliases** (from `~/.vibe/config.toml`):
+
+| Alias | Model | Provider | Notes |
+|-------|-------|----------|-------|
+| `deepseek-flash` | deepseek-v4-flash | DeepSeek | Default — fast, cheap |
+| `mistral-medium-3.5` | mistral-vibe-cli-latest | Mistral | Stronger reasoning |
+| `devstral-small` | devstral-small-latest | Mistral | Lighter Mistral model |
+| `local` | devstral (llamacpp) | Local | Requires local server on :8080 |
+
+Run the bash command, print one confirmation line showing the active model, and stop.
+
+---
+
 When the user invokes `/vibe <instruction>`, Claude delegates the implementation
 to Mistral Vibe via its programmatic mode, supervises in real time, and reports.
 

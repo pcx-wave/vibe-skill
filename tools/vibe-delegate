@@ -31,6 +31,15 @@ if [ ! -d "$WORKDIR" ]; then
   exit 1
 fi
 
+# Model override: /vibe-model-pick writes alias to this flag file.
+# VIBE_ACTIVE_MODEL is inherited by the script child process via `script`.
+VIBE_MODEL_FLAG="$HOME/.local/share/vibe-model.flag"
+VIBE_MODEL_OVERRIDE=""
+if [ -f "$VIBE_MODEL_FLAG" ]; then
+  VIBE_MODEL_OVERRIDE=$(tr -d '[:space:]' < "$VIBE_MODEL_FLAG")
+  export VIBE_ACTIVE_MODEL="$VIBE_MODEL_OVERRIDE"
+fi
+
 cd "$WORKDIR"
 START_NS=$(date +%s%N)
 PROMPT_WORDS=$(printf '%s' "$PROMPT" | wc -w | tr -d ' ')
@@ -42,6 +51,7 @@ FILES_BEFORE=$(git diff --name-only 2>/dev/null; git ls-files --others --exclude
 echo "=== VIBE START ==="
 echo "Workdir : $WORKDIR"
 echo "Agent   : ${AGENT:-default}"
+echo "Model   : ${VIBE_MODEL_OVERRIDE:-(config default)}"
 echo "Turns   : $MAX_TURNS"
 echo "Timeout : ${TIMEOUT_SECS}s"
 echo "Prompt  : ${PROMPT:0:120}..."
