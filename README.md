@@ -31,7 +31,7 @@ Summary:
 
 > Costs based on official pricing (May 2026): Claude $3/$15 per M tokens, Mistral Medium 3.5 $1.50/$7.50, DeepSeek V4 Flash $0.14/$0.28. Assumes ~85% input / 15% output, typical for coding tasks. Claude orchestration overhead: ~500 tokens per run (negligible).
 
-> **Le Chat Pro users:** Mistral Vibe is included in the [Le Chat Pro](https://mistral.ai/pricing) subscription ($14.99/mo) with a monthly usage budget. Within that budget, every delegation costs $0 in API fees — cheaper than any paid model. Beyond the budget, usage continues at pay-as-you-go API rates.
+> **Le Chat Pro users:** Mistral Vibe is included in the [Le Chat Pro](https://mistral.ai/pricing) subscription ($14.99/mo). Within the included usage, every delegation costs $0 in API fees — cheaper than any paid model. Beyond that, usage continues at pay-as-you-go API rates.
 
 **Context window protection** — On long coding sessions, every file read, function body, and debug loop burns Claude's context. Delegating to Vibe keeps that budget free. Claude enters the task, hands off, and comes back only to review the result — no context bleed from Vibe's internal turns.
 
