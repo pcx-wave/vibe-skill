@@ -178,7 +178,7 @@ Sample output from a real run:
 === VIBE START ===
 Workdir : /path/to/project
 Agent   : default
-Model   : deepseek-flash  (config default)
+Model   : (config default)
 Turns   : 10
 Timeout : 180s
 Prompt  : Stack: Python/Flask. File: app.py ...
