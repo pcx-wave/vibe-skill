@@ -14,8 +14,13 @@ echo "<alias>" > ~/.local/share/vibe-model.flag
 
 Then reply: "Model set to `<alias>` — all vibe delegations will use this model until /vibe-model-clear."
 
-If no alias is provided, list the available aliases and ask the user to pick one:
-- `deepseek-flash` — DeepSeek v4 Flash (fast, cheap, config default)
-- `mistral-medium-3.5` — Mistral Medium 3.5 (stronger reasoning)
-- `devstral-small` — Devstral Small (lighter Mistral model)
-- `local` — local llamacpp server on :8080
+If no alias is provided, use AskUserQuestion with a single-select question:
+
+Question: "Which Vibe model do you want to use?"
+Options:
+- label: "deepseek-flash", description: "DeepSeek v4 Flash — fast, cheap (config default)"
+- label: "mistral-medium-3.5", description: "Mistral Medium 3.5 — stronger reasoning"
+- label: "devstral-small", description: "Devstral Small — lighter Mistral model"
+- label: "local", description: "Local llamacpp server on :8080"
+
+Then write the selected alias to the flag file and confirm.
