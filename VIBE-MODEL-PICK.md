@@ -14,13 +14,24 @@ echo "<alias>" > ~/.local/share/vibe-model.flag
 
 Then reply: "Model set to `<alias>` — all vibe delegations will use this model until /vibe-model-clear."
 
-If no alias is provided, use AskUserQuestion with a single-select question:
+If no alias is provided, first read the available models from `~/.vibe/config.toml`:
 
-Question: "Which Vibe model do you want to use?"
-Options:
-- label: "deepseek-flash", description: "DeepSeek v4 Flash — fast, cheap (config default)"
-- label: "mistral-medium-3.5", description: "Mistral Medium 3.5 — stronger reasoning"
-- label: "devstral-small", description: "Devstral Small — lighter Mistral model"
-- label: "local", description: "Local llamacpp server on :8080"
+```bash
+python3 -c "
+import tomllib, os
+with open(os.path.expanduser('~/.vibe/config.toml'), 'rb') as f:
+    cfg = tomllib.load(f)
+active = cfg.get('active_model', '')
+for m in cfg.get('models', []):
+    alias = m.get('alias', m.get('name', ''))
+    provider = m.get('provider', '')
+    note = ' (current default)' if alias == active else ''
+    print(f'{alias}|{provider}{note}')
+"
+```
+
+Then use AskUserQuestion with a single-select question built from that output:
+- Question: "Which Vibe model do you want to use?"
+- One option per line: label = alias, description = provider + note
 
 Then write the selected alias to the flag file and confirm.
