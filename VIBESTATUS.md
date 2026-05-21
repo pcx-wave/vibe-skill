@@ -1,18 +1,20 @@
 ---
 name: vibestatus
-description: Check whether vibe auto-mode is currently ON or OFF, and show active model override.
+description: Show Vibe auto-delegate mode status (ON/OFF) and active model override.
+license: MIT
 user-invocable: true
 allowed-tools:
   - bash
 ---
 
-Run both checks and report two lines:
+# /vibestatus
 
-```bash
-test -f ~/.local/share/vibe-auto.flag && echo "Auto-vibe: ON" || echo "Auto-vibe: OFF"
-if [ -f ~/.local/share/vibe-model.flag ]; then
-  echo "Model: $(cat ~/.local/share/vibe-model.flag)  (override)"
-else
-  echo "Model: deepseek-flash  (config default)"
-fi
+Run both checks and print two lines:
+
 ```
+Auto-vibe: ON | OFF
+Model: <alias>  (override)  OR  Model: <config default>
+```
+
+- Auto-vibe: `test -f ~/.local/share/vibe-auto.flag && echo ON || echo OFF`
+- Model override: `cat ~/.local/share/vibe-model.flag 2>/dev/null || echo "(config default)"`

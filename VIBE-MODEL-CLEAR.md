@@ -1,11 +1,14 @@
 ---
 name: vibe-model-clear
-description: Remove the Vibe model override and return to the config default (deepseek-flash).
+description: Clear the Vibe model override and revert to the config default.
+license: MIT
 user-invocable: true
 allowed-tools:
   - bash
 ---
 
+# /vibe-model-clear
+
 Run: `rm -f ~/.local/share/vibe-model.flag`
 
-Then reply: "Model override cleared — vibe will use deepseek-flash (config default)."
+Confirm: "Model override cleared — Vibe will use the config default."

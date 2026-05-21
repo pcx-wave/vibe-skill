@@ -201,7 +201,7 @@ try:
         try:
             with open(config_path, 'rb') as cf:
                 cfg = tomllib.load(cf)
-            active = cfg.get('active_model', model_name)
+            active = model_name  # use session's actual model, not config default
             for m in cfg.get('models', []):
                 if m.get('alias') == active or m.get('name') == active:
                     input_price = m.get('input_price', input_price)

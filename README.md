@@ -31,7 +31,45 @@ Summary:
 
 > Costs based on official pricing (May 2026): Claude $3/$15 per M tokens, Mistral Medium 3.5 $1.50/$7.50, DeepSeek V4 Flash $0.14/$0.28. Assumes ~85% input / 15% output, typical for coding tasks. Claude orchestration overhead: ~500 tokens per run (negligible).
 
-> **Le Chat Pro users:** Mistral Vibe is included in the [Le Chat Pro](https://mistral.ai/pricing) subscription ($14.99/mo). Mistral does not publicly document the exact usage limits, but within the included allowance every delegation costs $0 in API fees — cheaper than any paid model.
+> **Le Chat Pro users:** Mistral Vibe is included in the [Le Chat Pro](https://mistral.ai/pricing) subscription (~$18/mo). Mistral does not publicly document the exact usage limits, but community reports suggest ~1–1.5B tokens/month are included. Within that allowance every delegation costs $0 in API fees — cheaper than any paid model.
+
+### Real-world stats (254 runs, May 2026)
+
+**Cost savings observed over 10 days across 57M tokens delegated:**
+
+| | Amount |
+|---|---|
+| Actually paid (sub prorated + deepseek) | **$10.35** |
+| Same workload pay-as-you-go | $46.61 |
+| Same workload on Claude Sonnet | $179.91 |
+| Saved vs Claude | **$169.56 (17.4× cheaper)** |
+
+**Should you subscribe to Mistral Pro, or just use DeepSeek?**
+
+DeepSeek alone ($0.14/M blended) is cheaper than the Mistral Pro subscription (~$18/mo) until you hit **~131M tokens/month**:
+
+```
+tokens/month  │ DeepSeek only │ Mistral Pro sub │ Verdict
+──────────────┼───────────────┼─────────────────┼──────────────────────────
+  50M         │  $7.03        │  $18.36         │ DeepSeek cheaper
+  84M (now)   │  $11.80       │  $18.36         │ DeepSeek cheaper
+ 131M         │  $18.41       │  $18.36         │ ← break-even
+ 200M         │  $28.10       │  $18.36         │ Mistral Pro worth it
+ 500M         │  $70.25       │  $18.36         │ Mistral Pro worth it
+```
+
+Above 131M tokens/month, subscribe to Mistral Pro and use it until the quota (~1B–1.5B tokens) is exhausted — then fall back to DeepSeek. Never let Mistral roll into pay-as-you-go ($1.52/M blended — 10× more expensive than DeepSeek).
+
+**Reliability (deepseek-flash, 178 runs):**
+
+| Failure type | Rate | Root cause |
+|---|---|---|
+| `sr_fail` (search/replace miss) | 19% of runs | Model reconstructs SEARCH block from memory instead of exact file bytes |
+| `empty` (wrote nothing) | 12% of runs | Vague prompt or task already done; model stops without writing |
+| `warn` (non-fatal) | 21% of runs | Usually harmless; check `[WARN]` lines in output |
+| Hard failure (exit error) | 1.7% of runs | — |
+
+Mitigation: grep for the exact target before constructing the SEARCH block; phrase prompts as imperative verbs with an explicit file target.
 
 **Context window protection** — On long coding sessions, every file read, function body, and debug loop burns Claude's context. Delegating to Vibe keeps that budget free. Claude enters the task, hands off, and comes back only to review the result — no context bleed from Vibe's internal turns.
 
@@ -53,7 +91,7 @@ Summary:
 ## Installation
 
 ```bash
-git clone https://github.com/pcx-wave/vibe-skill.git && cd vibe-skill && mkdir -p ~/tools ~/.claude/skills/vibe ~/.claude/skills/vibeon ~/.claude/skills/vibeoff ~/.claude/skills/vibestatus ~/.claude/skills/vibe-model-pick ~/.claude/skills/vibe-model-clear && ln -sf "$(pwd)/tools/vibe-delegate" ~/tools/vibe-delegate && ln -sf "$(pwd)/tools/delegate-report" ~/tools/delegate-report && chmod +x ~/tools/vibe-delegate ~/tools/delegate-report && ln -sf "$(pwd)/SKILL.md" ~/.claude/skills/vibe/SKILL.md && ln -sf "$(pwd)/VIBEON.md" ~/.claude/skills/vibeon/SKILL.md && ln -sf "$(pwd)/VIBEOFF.md" ~/.claude/skills/vibeoff/SKILL.md && ln -sf "$(pwd)/VIBESTATUS.md" ~/.claude/skills/vibestatus/SKILL.md && ln -sf "$(pwd)/VIBE-MODEL-PICK.md" ~/.claude/skills/vibe-model-pick/SKILL.md && ln -sf "$(pwd)/VIBE-MODEL-CLEAR.md" ~/.claude/skills/vibe-model-clear/SKILL.md
+git clone https://github.com/pcx-wave/vibe-skill.git && cd vibe-skill && mkdir -p ~/tools ~/.claude/skills/vibe ~/.claude/skills/vibeon ~/.claude/skills/vibeoff ~/.claude/skills/vibestatus ~/.claude/skills/vibe-model-pick ~/.claude/skills/vibe-model-clear ~/.claude/skills/vibe-report && ln -sf "$(pwd)/tools/vibe-delegate" ~/tools/vibe-delegate && ln -sf "$(pwd)/tools/delegate-report" ~/tools/delegate-report && chmod +x ~/tools/vibe-delegate ~/tools/delegate-report && ln -sf "$(pwd)/SKILL.md" ~/.claude/skills/vibe/SKILL.md && ln -sf "$(pwd)/VIBEON.md" ~/.claude/skills/vibeon/SKILL.md && ln -sf "$(pwd)/VIBEOFF.md" ~/.claude/skills/vibeoff/SKILL.md && ln -sf "$(pwd)/VIBESTATUS.md" ~/.claude/skills/vibestatus/SKILL.md && ln -sf "$(pwd)/VIBE-MODEL-PICK.md" ~/.claude/skills/vibe-model-pick/SKILL.md && ln -sf "$(pwd)/VIBE-MODEL-CLEAR.md" ~/.claude/skills/vibe-model-clear/SKILL.md && ln -sf "$(pwd)/VIBE-REPORT.md" ~/.claude/skills/vibe-report/SKILL.md
 ```
 
 ### Step-by-step
@@ -71,13 +109,14 @@ chmod +x ~/tools/vibe-delegate ~/tools/delegate-report
 
 # 3. Install the skills for Claude Code
 mkdir -p ~/.claude/skills/vibe ~/.claude/skills/vibeon ~/.claude/skills/vibeoff ~/.claude/skills/vibestatus \
-         ~/.claude/skills/vibe-model-pick ~/.claude/skills/vibe-model-clear
+         ~/.claude/skills/vibe-model-pick ~/.claude/skills/vibe-model-clear ~/.claude/skills/vibe-report
 ln -sf "$(pwd)/SKILL.md" ~/.claude/skills/vibe/SKILL.md
 ln -sf "$(pwd)/VIBEON.md" ~/.claude/skills/vibeon/SKILL.md
 ln -sf "$(pwd)/VIBEOFF.md" ~/.claude/skills/vibeoff/SKILL.md
 ln -sf "$(pwd)/VIBESTATUS.md" ~/.claude/skills/vibestatus/SKILL.md
 ln -sf "$(pwd)/VIBE-MODEL-PICK.md" ~/.claude/skills/vibe-model-pick/SKILL.md
 ln -sf "$(pwd)/VIBE-MODEL-CLEAR.md" ~/.claude/skills/vibe-model-clear/SKILL.md
+ln -sf "$(pwd)/VIBE-REPORT.md" ~/.claude/skills/vibe-report/SKILL.md
 
 # 4. (Optional) Enable auto-mode — Claude delegates all code tasks automatically
 #    without requiring /vibe each time. Toggle with /vibeon and /vibeoff.
