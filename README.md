@@ -64,12 +64,15 @@ Above 131M tokens/month, subscribe to Mistral Pro and use it until the quota (~1
 
 | Failure type | Rate | Root cause |
 |---|---|---|
-| `sr_fail` (search/replace miss) | 19% of runs | Model reconstructs SEARCH block from memory instead of exact file bytes |
-| `empty` (wrote nothing) | 12% of runs | Vague prompt or task already done; model stops without writing |
+| `sr_fail` (search/replace miss) | 19% of runs | Model reconstructs SEARCH block from memory instead of exact file bytes; accented chars or backticks prevent byte-exact match |
+| `empty` (wrote nothing) | 12% of runs | Multi-edit prompt causes context drift — first target not found, run silently abandons; or task already done |
 | `warn` (non-fatal) | 21% of runs | Usually harmless; check `[WARN]` lines in output |
-| Hard failure (exit error) | 1.7% of runs | — |
+| Hard failure (exit 127) | 1.7% of runs | HTML tags (`<div>`, `</div>`) in prompt body interpreted as bash redirections |
 
-Mitigation: grep for the exact target before constructing the SEARCH block; phrase prompts as imperative verbs with an explicit file target.
+Mitigations:
+- Grep for the exact target string before writing any prompt that uses `search_replace`
+- One change per run — multi-edit prompts cause context drift and empty runs
+- For HTML/JS content: write to `/tmp` first, tell Vibe to read that file
 
 **Context window protection** — On long coding sessions, every file read, function body, and debug loop burns Claude's context. Delegating to Vibe keeps that budget free. Claude enters the task, hands off, and comes back only to review the result — no context bleed from Vibe's internal turns.
 
@@ -203,7 +206,14 @@ fix the broken email validation
 refactor the auth middleware into its own module
 ```
 
-Claude intercepts any request that involves writing, editing, or fixing code and delegates it to Vibe transparently. Pure questions and conversations still go directly to Claude — only code tasks are delegated.
+Claude intercepts code requests and applies a pre-filter before delegating:
+
+| Task | Action |
+|---|---|
+| 1 file, ≤10 lines, exact location known | Claude edits directly — no delegation overhead |
+| Everything else | Delegated to Vibe |
+
+Pure questions and conversations always go directly to Claude.
 
 ---
 

@@ -16,8 +16,7 @@ allowed-tools:
 
 ## /vibeon | /vibeoff | /vibestatus
 
-Toggle auto-delegate mode — Vibe automatically handles all coding tasks without
-requiring `/vibe` each time.
+Toggle auto-delegate mode — Vibe automatically handles coding tasks without requiring `/vibe` each time.
 
 | Command | Action |
 |---------|--------|
@@ -30,6 +29,16 @@ For `/vibestatus`, run both checks and print two lines:
 Auto-vibe: ON | OFF
 Model: <alias>  (override)  OR  Model: deepseek-flash  (config default)
 ```
+
+### Auto-mode pre-filter (when flag is set)
+
+When `vibe-auto.flag` exists, apply this gate **before** loading the full skill:
+
+| Task signal | Action |
+|---|---|
+| 1 file, ≤10 lines, exact location already known | Edit directly — do NOT invoke the skill |
+| Logic non-trivial, location unclear, multiple files, HTML/JS content, or >1 change | Invoke `/vibe` as normal |
+
 
 ---
 
@@ -119,17 +128,25 @@ TOML pricing lookup → git diff → JSON log`. Each link can fail independently
 When a run produces unexpected results, check these links in order from top to bottom.
 
 ### 7. Never pass source code through a bash heredoc
-Passing Python/JS code inline in a bash `<< 'PYEOF'` command fails when the code
-contains nested quotes, f-strings, or backslashes — Vibe's bash tool mangles the
-escaping. **This is not a reason to build a workaround script** — that doubles work.
+Nested quotes, f-strings, or backslashes in inline bash `<< 'PYEOF'` mangle escaping.
+- ASCII code: use `search_replace` directly.
+- Content too long for inline: ask Vibe to write to `/tmp/new.py`, then `search_replace` via `open('/tmp/new.py').read()`.
+- Never write a helper script whose sole job is `str.replace()` on another file.
 
-**Right approach for function replacement:**
-- If code is ASCII (no accents, no emoji): use `search_replace` directly — it works.
-- If content is too long for an inline prompt: ask Vibe to **write the new content**
-  to a temp file with its write tool, then `search_replace` the old function using the
-  file's content via `open('/tmp/new.py').read()`.
-- Never write a Python script whose sole job is to call `str.replace()` on another
-  Python file — that is always unnecessary complexity.
+### 8. HTML tags in the prompt body cause shell redirect errors (exit 127)
+`<div>`, `</div>`, `<span>` etc. embedded in the prompt string are interpreted by
+bash as file redirections. `div` is not a command → "No such file or directory", exit 127.
+**Rule:** if the prompt references or contains any HTML — even in a quoted description —
+write the content to a temp file first:
+```bash
+cat > /tmp/new_block.html << 'EOF'
+<div class="map-sidebar">...</div>
+EOF
+```
+Then reference it in the prompt: "Replace the sidebar block in `templates/map.html`
+with the content of `/tmp/new_block.html`." Vibe reads it with `read_file`, no shell parsing.
+
+This also applies to JS files containing template literals (backticks) or JSX-like syntax.
 
 ---
 
@@ -157,6 +174,8 @@ savings. Apply this filter first:
 | 1 file, logic non-trivial OR location unclear | Delegate — exploration + edit in one run |
 | 2–3 files, single objective | Delegate |
 | >3 files OR multi-step logic OR migrations | Delegate, broken into sub-tasks |
+| Content with HTML / template literals / backticks | Write to `/tmp` first, tell Vibe to read that file |
+| > 1 distinct change in same prompt | Split into sequential single-change runs — multi-edit causes context drift → empty run |
 
 The sweet spot is **medium to heavy tasks** where Vibe's internal file reads and multi-turn
 exploration would otherwise burn significant Claude context.
@@ -215,23 +234,6 @@ VERIFY: grep for "def function_name" in file.py and confirm it exists.
 VERIFY: grep for "def extract_labels" in app.py and confirm it exists.
 ```
 A grep is reliable. A file re-read may miss content outside the read window.
-
-**Examples:**
-
-❌ Bad (too vague, too large):
-```
-Fix the API, add a signal classifier, update the UI with colored badges
-```
-
-✅ Good (atomic, verifiable):
-```
-Stack: Python/Flask. File: app.py
-
-TASK: In fetch_data(), convert the date string (format "YYYY-MM-DD")
-to datetime.date before returning, and convert id to str.
-
-VERIFY: grep for "datetime.date" in app.py and confirm it appears in fetch_data.
-```
 
 ---
 
@@ -323,13 +325,8 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 | Truncated prompt | Special chars in inline prompt | Script uses temp file — should be fixed |
 | Wrote a Python helper just to replace code | Misdiagnosed search_replace limit — plain Python code works fine | Use search_replace directly for ASCII code; write_file only if the new content is too long for the prompt |
 | Passed code via bash heredoc | Nested quotes break in Vibe's bash execution | Never put source code in a heredoc; use write_file tool instead |
-| **Merge conflict markers left in code** | Vibe uses search_replace on files with prior edits, leaves `=======` markers | After any run touching edited files, grep: `grep -n "=======" file`. Fix with `python3 str.replace()` |
-| **D3 `source`/`target` field conflict** | Vibe names edge fields `source`/`target` which D3 forceLink hijacks internally | Use `from`/`to` for custom edge fields. Map explicitly: `edges.map(e => ({...e, source: e.from, target: e.to}))` before passing to forceLink |
-| **D3 tick handler overwritten** | Vibe registers custom force as `simulation.on('tick', fn)` — D3 overwrites previous listener with same name | Use `.force('name', fn)` not tick handlers for custom forces |
-| **Function defined but never called** | Vibe writes helper functions (e.g. `renderX()`) but omits the call in init sequence | After every frontend run, grep new functions and verify they're called: `grep -n "^function " file.html` |
-| **Large file timeout (>300 lines)** | Vibe hits the 360s wall generating a large single file | Break into sub-tasks: CSS → HTML structure → JS logic. Never ask for >200 lines in one prompt |
-| **PM2 env vars not loading** | `pm2 start "bash -c 'source ~/.vibe/.env && ...'"` — quotes in .env break export | Use a wrapper script: `printf '#!/bin/bash\nset -a; source ~/.vibe/.env; set +a\npython3 ...\n' > /tmp/run.sh && pm2 start /tmp/run.sh` |
-| **LLM batch fallback flood** | Large batches (50 items) return wrong count → entire batch falls back to catch-all | Use batches ≤20 items. On count mismatch: pad/truncate instead of full fallback |
+| exit 127 — "No such file or directory" | HTML tags (`<div>`, `</div>`) in prompt interpreted as bash redirections | Write HTML to `/tmp` first (see Known Limit #8), reference file path in prompt |
+| Empty run — 0 files changed despite ≥3 tool calls | Multi-edit prompt: context drifts after long file read, first `search_replace` target not found byte-for-byte, run silently abandons | Split into sequential single-change runs; grep target string locally before delegating |
 
 **If exit non-zero:** do not relaunch immediately. Read the diff, understand what was done, fix the prompt.
 
@@ -408,7 +405,7 @@ Ready to commit?
 - **Check diff between sub-tasks** — never launch the next one blind.
 - **Don't code instead of Vibe** unless Vibe completed ≥50% and crashed.
 - **Max 12 turns per call** — beyond that, Mistral context saturates.
-- **VERIFY with grep, not file re-read** — `grep -n "def foo" file.py` is reliable.
+- **Grep target before delegating** — `grep -n "exact_target" file.py` before any `search_replace` prompt. No match = empty run. Always use grep for VERIFY, not file re-read.
 - **UTF-8 / emoji in the prompt** → the script handles it via temp file, but test with a short prompt first.
 - **After any run that touches imports: grep the import line** — sequential runs can revert each other's import changes. Always run `grep "^from X import" file.py` before the next sub-task.
 - **search_replace [OK] ≠ correct change** — Vibe may report OK even if the match was on unintended content. Always grep the specific changed line, not just check syntax.
@@ -417,79 +414,19 @@ Ready to commit?
 
 ---
 
-## Token economics
-
-Vibe's internal turns (repeated file reads, etc.) consume **Mistral tokens**,
-not Claude tokens. Claude only receives the compressed final output (~500–1500 tokens/run).
-
-For a task with 6 reads of an 800-line file: ~4800 tokens on Mistral's side, 0 on Claude's.
-**Real advantage** on exploratory tasks. Neutral or slightly negative if Vibe fails and
-generates long error output that comes back into Claude's context.
-
-**Approximate pricing (Mistral Codestral):**
-- ~$1.5/M input tokens, ~$7.5/M output tokens
-- Claude Sonnet 4.6: ~$3/M input, ~$15/M output
-- Typical ratio: ~2x cheaper per token than Claude, plus 0 Claude tokens on orchestration overhead
-
-Real token counts and cost are printed after every run and appended to the run log.
-
----
-
 ## Run Log
 
 Every run appends one JSON entry to `~/.local/share/delegate-runs.jsonl`.
-
-**Fields logged:**
-
-| Field           | Type    | Description                                          |
-|-----------------|---------|------------------------------------------------------|
-| `ts`            | string  | ISO 8601 UTC timestamp                               |
-| `delegate`      | string  | `"vibe"`                                             |
-| `workdir`       | string  | Absolute project path                                |
-| `project`       | string  | `basename(workdir)`                                  |
-| `prompt_words`  | int     | Word count of the prompt (complexity proxy)          |
-| `agent`         | string  | Agent used (`"default"`, `"code-reviewer"`, etc.)   |
-| `max_turns`     | int     | Configured `--max-turns` value                       |
-| `timeout_secs`  | int     | Configured timeout in seconds                        |
-| `exit_code`     | int     | 0=success · 124=timeout · other=error                |
-| `timed_out`     | bool    | `true` if `exit_code == 124`                         |
-| `tool_calls`    | int     | Total tool invocations made by Vibe                  |
-| `files_changed` | int     | Files modified (git diff count)                      |
-| `syntax_errors` | int     | Python/JS syntax errors detected post-run            |
-| `duration_secs` | float   | Total wall-clock duration                            |
-| `tokens_in`     | int     | Prompt tokens (from Mistral session log)             |
-| `tokens_out`    | int     | Completion tokens                                    |
-| `tokens_total`  | int     | Total tokens                                         |
-| `cost_usd`            | float   | Estimated delegate cost in USD                       |
-| `cost_claude_eq`      | float   | Claude Sonnet 4.6 equivalent cost for same tokens    |
-| `model`               | string  | Active model alias from `config.active_model` (e.g. `"deepseek-flash"`, `"mistral-medium"`) |
-| `warn_count`          | int     | Number of `[WARN]` events during the run             |
-| `search_replace_fails`| int     | Number of `search_replace [FAIL]` events             |
-| `wrote_nothing`       | bool    | `true` if Vibe ran ≥3 tool calls but changed 0 files |
-
-**Report script — `~/tools/delegate-report`:**
+Log fields and jq queries → see `SKILL-reference.md`.
 
 ```bash
-~/tools/delegate-report                  # full report (all time)
+~/tools/delegate-report                  # full report
 ~/tools/delegate-report --since 7        # last 7 days
 ~/tools/delegate-report --project myapp  # filter by project
-~/tools/delegate-report --fails          # failures and issues only
+~/tools/delegate-report --fails          # failures only
 ```
 
 Or via Claude Code: `/vibe-report [args]`
-
-**Raw jq queries:**
-```bash
-# Success rate
-jq -r '.exit_code' ~/.local/share/delegate-runs.jsonl | sort | uniq -c
-
-# Total cost vs Claude equivalent
-jq -r '[.cost_usd, .cost_claude_eq] | @tsv' ~/.local/share/delegate-runs.jsonl \
-  | awk '{c+=$1; e+=$2} END {printf "Spent: $%.4f  Claude eq: $%.4f  Saved: $%.4f\n", c, e, e-c}'
-
-# Runs with search_replace failures
-jq 'select(.search_replace_fails > 0)' ~/.local/share/delegate-runs.jsonl
-```
 
 ---
 
