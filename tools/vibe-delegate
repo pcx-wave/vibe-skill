@@ -86,14 +86,8 @@ trap 'rm -f "$VIBE_SCRIPT" "$PROMPT_FILE" "$DELEGATE_STATS_FILE"' EXIT
 } > "$VIBE_SCRIPT"
 chmod +x "$VIBE_SCRIPT"
 
-# Run vibe inside `script` to give it a pseudo-TTY (required — vibe hangs without one).
-# GNU/Linux uses: script -q -c \"cmd\" /dev/null
-# macOS (BSD) uses: script -q /dev/null \"cmd\"
-if [[ "$(uname)" == "Darwin" ]]; then
-  SCRIPT_CMD=(script -q /dev/null "$VIBE_SCRIPT")
-else
-  SCRIPT_CMD=(script -q -c "$VIBE_SCRIPT" /dev/null)
-fi
+# Pseudo-TTY for vibe via python pty.spawn (works without a parent TTY, unlike `script`).
+SCRIPT_CMD=(python3 -c 'import pty,sys,os; sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))' "$VIBE_SCRIPT")
 
 timeout "$TIMEOUT_SECS" "${SCRIPT_CMD[@]}" | python3 -c "
 import sys, json, re, os
