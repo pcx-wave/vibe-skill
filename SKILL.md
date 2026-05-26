@@ -89,30 +89,17 @@ to Mistral Vibe via its programmatic mode, supervises in real time, and reports.
 
 Hard constraints of Mistral Vibe CLI — not config options.
 
-### 1. Requires a pseudo-TTY
-Vibe checks for a TTY on startup. Without one (plain pipe), it hangs silently —
-0 tool calls, no output, silent timeout. The `vibe-delegate` script allocates a
-pseudo-TTY via `script` (Linux: `script -q -c "..." /dev/null`, macOS: `script -q /dev/null "..."`). **Never call vibe directly in a pipe.**
-
-### 2. UTF-8 / special chars cause `search_replace` failures
+### 1. UTF-8 / special chars cause `search_replace` failures
 Vibe's `search_replace` tool matches byte-for-byte. Accented chars, curly quotes,
 or emoji in `old_string` → silent match failure, no write. Workaround: use
 `python3 str.replace()` for those edits, or restructure the prompt to avoid them.
 
-### 3. Context saturation above ~12 turns
-Mistral's context fills with repeated file reads. Beyond 12 turns the model starts
-looping — re-reading files it already read, not making progress. Hard cap: `--max-turns 12`.
-
-### 4. `--output text` hides errors
-`--output text` buffers everything until the run ends and suppresses intermediate
-errors. Always use `--output streaming` (done automatically by `vibe-delegate`).
-
-### 5. Code duplication bug
+### 2. Code duplication bug
 Vibe sometimes re-inserts a block it has already written (off-by-one in its diff
 logic). Check for duplicate function definitions or repeated class bodies after
 every run.
 
-### 6. Orchestration chain has 6 independent failure points
+### 3. Orchestration chain has 6 independent failure points
 The delegation pipeline is: `vibe CLI → pseudo-TTY (script) → Python stream parser →
 TOML pricing lookup → git diff → JSON log`. Each link can fail independently:
 
@@ -127,13 +114,13 @@ TOML pricing lookup → git diff → JSON log`. Each link can fail independently
 
 When a run produces unexpected results, check these links in order from top to bottom.
 
-### 7. Never pass source code through a bash heredoc
+### 4. Never pass source code through a bash heredoc
 Nested quotes, f-strings, or backslashes in inline bash `<< 'PYEOF'` mangle escaping.
 - ASCII code: use `search_replace` directly.
 - Content too long for inline: ask Vibe to write to `/tmp/new.py`, then `search_replace` via `open('/tmp/new.py').read()`.
 - Never write a helper script whose sole job is `str.replace()` on another file.
 
-### 8. HTML tags in the prompt body cause shell redirect errors (exit 127)
+### 5. HTML tags in the prompt body cause shell redirect errors (exit 127)
 `<div>`, `</div>`, `<span>` etc. embedded in the prompt string are interpreted by
 bash as file redirections. `div` is not a command → "No such file or directory", exit 127.
 **Rule:** if the prompt references or contains any HTML — even in a quoted description —
@@ -161,26 +148,6 @@ This also applies to JS files containing template literals (backticks) or JSX-li
 
 **Critical rule**: Vibe is optimized for **atomic, focused tasks**.
 Its system prompt literally says "Most tasks need <150 words."
-
-**Decide whether to delegate at all:**
-
-`vibe-delegate` has real orchestration overhead (pseudo-TTY allocation, stream parser,
-TOML pricing lookup, git diff, JSON log). For trivial changes the setup cost exceeds the
-savings. Apply this filter first:
-
-| Signal | Action |
-|--------|--------|
-| 1 file, ≤ ~10 lines to change, location already known | **Do it directly** — don't delegate |
-| 1 file, logic non-trivial OR location unclear | Delegate — exploration + edit in one run |
-| 2–3 files, single objective | Delegate |
-| >3 files OR multi-step logic OR migrations | Delegate, broken into sub-tasks |
-| Content with HTML / template literals / backticks | Write to `/tmp` first, tell Vibe to read that file |
-| > 1 distinct change in same prompt | Split into sequential single-change runs — multi-edit causes context drift → empty run |
-
-The sweet spot is **medium to heavy tasks** where Vibe's internal file reads and multi-turn
-exploration would otherwise burn significant Claude context.
-
-**Evaluate complexity before launching:**
 
 | Size | Definition | Max turns | Approach |
 |------|-----------|-----------|----------|
@@ -319,13 +286,9 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 
 | Bug | Cause | Fix |
 |-----|-------|-----|
-| `search_replace failed` | UTF-8/emoji chars in `old_string` | Edit with `python3 str.replace()` — only needed for actual UTF-8, not plain Python code |
-| Duplicated code at end of file | Vibe re-inserts an already-present block | Read diff, delete duplicate manually |
 | Variable declared twice | Same — Vibe doesn't check scope | Grep the variable before relaunching |
 | Truncated prompt | Special chars in inline prompt | Script uses temp file — should be fixed |
 | Wrote a Python helper just to replace code | Misdiagnosed search_replace limit — plain Python code works fine | Use search_replace directly for ASCII code; write_file only if the new content is too long for the prompt |
-| Passed code via bash heredoc | Nested quotes break in Vibe's bash execution | Never put source code in a heredoc; use write_file tool instead |
-| exit 127 — "No such file or directory" | HTML tags (`<div>`, `</div>`) in prompt interpreted as bash redirections | Write HTML to `/tmp` first (see Known Limit #8), reference file path in prompt |
 | Empty run — 0 files changed despite ≥3 tool calls | Multi-edit prompt: context drifts after long file read, first `search_replace` target not found byte-for-byte, run silently abandons | Split into sequential single-change runs; grep target string locally before delegating |
 
 **If exit non-zero:** do not relaunch immediately. Read the diff, understand what was done, fix the prompt.
@@ -343,42 +306,10 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 When you finish a task manually (after Vibe failures), run this immediately after editing:
 
 ```bash
-python3 -c "
-import json, datetime, subprocess, os
-
-workdir = subprocess.run(['git','rev-parse','--show-toplevel'], capture_output=True, text=True).stdout.strip() or os.getcwd()
-project = os.path.basename(workdir.rstrip('/'))
-
-stat = subprocess.run(['git','-C',workdir,'diff','--stat'], capture_output=True, text=True).stdout
-lines_added = sum(
-    int(l.split('+')[1].split()[0])
-    for l in stat.splitlines()
-    if '|' in l and '+' in l
-) if stat else 0
-files_changed = len([l for l in stat.splitlines() if '|' in l])
-
-tokens_out = lines_added * 10
-tokens_in  = lines_added * 40
-cost = (tokens_in * 3.0 + tokens_out * 15.0) / 1_000_000
-
-entry = {
-    'ts': datetime.datetime.utcnow().isoformat() + 'Z',
-    'delegate': 'claude-manual',
-    'workdir': workdir, 'project': project,
-    'exit_code': 0, 'files_changed': files_changed,
-    'tokens_in': tokens_in, 'tokens_out': tokens_out,
-    'tokens_total': tokens_in + tokens_out,
-    'cost_usd': round(cost, 6), 'cost_estimated': True,
-    'lines_added': lines_added,
-}
-log = os.path.expanduser('~/.local/share/delegate-runs.jsonl')
-with open(log, 'a') as f:
-    f.write(json.dumps(entry) + '\n')
-print(f'[log] claude-manual → {project}  ~{lines_added} lines added  est. cost \${cost:.4f}')
-"
+python3 tools/log-manual.py
 ```
 
-Run from anywhere inside the project. Token estimate: output ≈ lines_added × 10, input ≈ lines_added × 40 (context reading). Flagged `cost_estimated: true` in the log.
+Script source: see `SKILL-reference.md` — Manual Completion Logging.
 
 ---
 
