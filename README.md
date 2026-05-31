@@ -35,18 +35,33 @@ Summary:
 
 ### Subscribe to Mistral Pro, or just use DeepSeek?
 
-DeepSeek alone ($0.14/M blended) is cheaper than the Mistral Pro subscription (~$18/mo) until you hit **~131M tokens/month**:
+DeepSeek's headline input rate is $0.14/M — but that is the cache-**miss** rate. With
+prompt caching on iterative coding (the same file context resent across turns), real
+billed cost is far lower. Measured over this period: **$5.07 for 227M tokens ≈ $0.022/M
+blended**, because 90% of input was served from cache at $0.0028/M. At that rate
+DeepSeek-only stays cheaper than the Mistral Pro subscription (~$18/mo) until **~800M
+tokens/month**:
 
 ```
-tokens/month  │ DeepSeek only │ Mistral Pro sub │ Verdict
-──────────────┼───────────────┼─────────────────┼──────────────────────────
-  50M         │  $7.03        │  $18.36         │ DeepSeek cheaper
- 131M         │  $18.41       │  $18.36         │ ← break-even
- 221M (now)   │  $31.01       │  $18.36         │ Mistral Pro worth it
- 500M         │  $70.25       │  $18.36         │ Mistral Pro worth it
+tokens/month  │ DeepSeek only* │ Mistral Pro sub │ Verdict
+──────────────┼────────────────┼─────────────────┼──────────────────────────
+  50M         │  $1.12         │  $18.36         │ DeepSeek cheaper
+ 221M (now)   │  $4.93         │  $18.36         │ DeepSeek cheaper
+ 500M         │  $11.15        │  $18.36         │ DeepSeek cheaper
+ 820M         │  $18.30        │  $18.36         │ ← break-even
+   1B         │  $22.30        │  $18.36         │ Mistral Pro worth it
 ```
 
-Above 131M tokens/month, subscribe to Mistral Pro and use it until the quota (~1B–1.5B tokens) is exhausted — then fall back to DeepSeek. Never let Mistral roll into pay-as-you-go ($1.52/M blended — 10× more expensive than DeepSeek).
+\* Assumes the ~90% cache-hit rate observed on iterative coding. One-off, diverse tasks
+cache less and trend toward the $0.14/M miss rate — at which break-even drops back to
+~130M/month. So the honest range is **break-even somewhere between ~130M (cache-light)
+and ~800M (cache-heavy) tokens/month.**
+
+At the current ~221M/month on cache-heavy coding, DeepSeek-only (~$5) is well under the
+Mistral Pro sub — the *opposite* of what a cache-blind $0.14/M estimate would suggest.
+Subscribe to Mistral Pro only once you are reliably above your break-even band, and use
+it until the quota (~1B–1.5B tokens) is exhausted. Never let Mistral roll into
+pay-as-you-go ($1.52/M blended).
 
 ### Delegation synthesis — as of 2026-05-30
 

@@ -133,8 +133,8 @@ def show_overview(runs, scope='vibe only'):
     print(f"  Success rate  : {fmt_pct(ok, total)}")
     print(f"  Avg duration  : {avg_dur:.1f}s")
     print(f"  Tokens total  : {tokens:,}")
-    print(f"  Delegate cost : {fmt_cost(cost)}")
-    print(f"  Claude equiv  : {fmt_cost(claude_eq)}")
+    print(f"  Delegate cost*: {fmt_cost(cost)}")
+    print(f"  Claude equiv* : {fmt_cost(claude_eq)}")
     if manual_runs:
         manual_lines = sum(r.get('lines_added', 0) for r in manual_runs)
         print(f"  Manual (Claude): {len(manual_runs)} intervention(s)  ~{manual_lines} lines  est. {fmt_cost(manual_cost)}")
@@ -147,6 +147,8 @@ def show_overview(runs, scope='vibe only'):
         if sr_f:          print(f"  SR failures   : {sr_f}")
         if syntax:        print(f"  Syntax errors : {syntax}")
         if wrote_nothing: print(f"  Wrote nothing : {wrote_nothing}  (prompt too vague or task already done)")
+    print(f"\n  * cost = cache-blind estimate from config.toml pricing; real spend can be")
+    print(f"    far lower (e.g. cached input). See README → cost methodology.")
     print()
 
 

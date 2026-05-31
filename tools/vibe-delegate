@@ -230,6 +230,9 @@ try:
     total = stats.get('last_turn_total_tokens', prompt + completion)
     cost = stats.get('session_cost', 0)
     session_total = stats.get('session_total_llm_tokens', 0)
+    # Exact cumulative in/out for the whole run — preferred over the last-turn ratio.
+    session_in  = stats.get('session_prompt_tokens', 0)
+    session_out = stats.get('session_completion_tokens', 0)
     model_name = data.get('config', {}).get('active_model', 'unknown')
 
     # Read per-model pricing from ~/.vibe/config.toml (fallback: Mistral Medium 3.5 rates)
@@ -255,16 +258,22 @@ try:
         except Exception:
             pass
 
-    # Each -p invocation creates a new session, so session_total_llm_tokens is
-    # the full run total. last_turn_* covers only the final exchange — wrong for
-    # multi-turn runs (e.g. 10 turns × 8 reads each = ~10× undercount).
-    run_total = session_total if session_total > 0 else total
-    if (prompt + completion) > 0 and run_total > 0:
-        ratio_in = prompt / (prompt + completion)
-        run_tokens_in  = round(run_total * ratio_in)
-        run_tokens_out = run_total - run_tokens_in
+    # Each -p invocation creates a new session, so the session_* totals cover the
+    # whole run. Prefer Vibe's exact cumulative in/out split; fall back to the
+    # last-turn ratio only when the cumulative fields are absent (older Vibe).
+    if session_in > 0 or session_out > 0:
+        run_tokens_in, run_tokens_out = session_in, session_out
     else:
-        run_tokens_in, run_tokens_out = prompt, completion
+        run_total = session_total if session_total > 0 else total
+        if (prompt + completion) > 0 and run_total > 0:
+            ratio_in = prompt / (prompt + completion)
+            run_tokens_in  = round(run_total * ratio_in)
+            run_tokens_out = run_total - run_tokens_in
+        else:
+            run_tokens_in, run_tokens_out = prompt, completion
+    run_total = run_tokens_in + run_tokens_out
+    # NOTE: cost is cache-blind — Vibe's meta.json exposes no cache-hit/miss split,
+    # so all input is priced at the full input rate. Treat cost_usd as an upper bound.
     run_cost = (run_tokens_in * input_price + run_tokens_out * output_price) / 1_000_000
     claude_cost = (run_tokens_in * 3.0 + run_tokens_out * 15.0) / 1_000_000
     print(f'Model               : {model_name}')
