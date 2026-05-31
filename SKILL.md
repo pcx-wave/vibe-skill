@@ -191,6 +191,16 @@ VERIFY: grep for "def function_name" in file.py and confirm it exists.
 - Include a grep-based verification criterion (not a file re-read)
 - Language: English (better Mistral performance)
 
+**Prompt adaptations (tracked per-run — use `/vibe-report --adapt` to see impact over time):**
+
+| Adaptation | When | How |
+|---|---|---|
+| `contract` | Any task C3+ (endpoint, async refactor, cache layer) | Include exact signature: `def validate(data: dict) -> tuple[bool, list[str]]:` |
+| `output_format` | Any write/modify task | Append `OUTPUT FORMAT:\nModified: <file>\nDoes: <one line>\nNo other prose.` |
+| `compact` | Short standalone tasks | Keep under 80 words — reduces delegate-side context tokens |
+
+The `contract` adaptation recovers +14–27% functional pass-rate at C3–C4 by removing interface ambiguity before the run starts (measured, handoff-probe). The log records which adaptations were active per run.
+
 > ⚠️ **Shell safety**: if the prompt contains UTF-8 accented chars, emojis,
 > `:` in Python/YAML code, or typographic apostrophes — the vibe-delegate script
 > passes them safely via a temp file (`printf %q`). Never interpolate such a prompt
@@ -354,10 +364,15 @@ Log fields and jq queries → see `SKILL-reference.md`.
 ~/tools/delegate-report                  # full report
 ~/tools/delegate-report --since 7        # last 7 days
 ~/tools/delegate-report --project myapp  # filter by project
-~/tools/delegate-report --fails          # failures only
+~/tools/delegate-report --fails          # failures only (with benchmark by model)
+~/tools/delegate-report --adapt          # failure rates by prompt adaptation
 ```
 
 Or via Claude Code: `/vibe-report [args]`
+
+**New log fields (added 2026-05-31):**
+- `failure_reason` — specific outcome: `ok` | `silent_exit` | `near_empty` | `wrote_nothing` | `timeout` | `exit_error` | `syntax_error` | `sr_fail` | `warn_only`
+- `adaptations` — list of prompt adaptations active for this run: `contract` | `output_format` | `compact`
 
 ---
 

@@ -355,9 +355,10 @@ export DELEGATE_FILES_CHANGED="$FILES_CHANGED_COUNT"
 export DELEGATE_SYNTAX_ERRORS="$TOTAL_ERRORS"
 export DELEGATE_START_NS="$START_NS"
 export DELEGATE_END_NS="$END_NS"
+export DELEGATE_PROMPT_FILE="$PROMPT_FILE"
 
 python3 << 'PYLOG'
-import json, os
+import json, os, re
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -376,6 +377,28 @@ start_ns = int(os.environ.get('DELEGATE_START_NS', 0) or 0)
 end_ns   = int(os.environ.get('DELEGATE_END_NS',   0) or 0)
 duration = round((end_ns - start_ns) / 1e9, 1) if start_ns and end_ns else 0
 
+# Detect prompt adaptations from the prompt text.
+# These are logged per-run so failure rates can be compared across adaptation styles.
+prompt_text = ''
+pf = os.environ.get('DELEGATE_PROMPT_FILE', '')
+if pf:
+    try:
+        prompt_text = Path(pf).read_text(errors='replace')
+    except Exception:
+        pass
+
+adaptations = []
+if prompt_text:
+    # contract: prompt includes a Python function signature or return type annotation
+    if re.search(r'\bdef \w+\s*\(|->|\bCallable\b|: \w+\[', prompt_text):
+        adaptations.append('contract')
+    # output_format: prompt requests a structured receipt (Modified:/Does:/OUTPUT FORMAT)
+    if re.search(r'OUTPUT\s+FORMAT|Modified:|Created/Modified:|Does:', prompt_text, re.I):
+        adaptations.append('output_format')
+    # compact: short, focused prompt (fewer context tokens on the delegate side)
+    if len(prompt_text.split()) < 80:
+        adaptations.append('compact')
+
 entry = {
     'ts':            datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
     'delegate':      os.environ.get('DELEGATE_NAME', 'vibe'),
@@ -387,11 +410,12 @@ entry = {
     'timeout_secs':  int(os.environ.get('DELEGATE_TIMEOUT', 0) or 0),
     'exit_code':     int(os.environ.get('DELEGATE_EXIT', 0) or 0),
     'timed_out':     os.environ.get('DELEGATE_EXIT') == '124',
-    'files_changed':       int(os.environ.get('DELEGATE_FILES_CHANGED', 0) or 0),
-    'syntax_errors':       int(os.environ.get('DELEGATE_SYNTAX_ERRORS', 0) or 0),
-    'duration_secs':       duration,
-    'warn_count':          stats.get('warn_count', 0),
+    'files_changed':        int(os.environ.get('DELEGATE_FILES_CHANGED', 0) or 0),
+    'syntax_errors':        int(os.environ.get('DELEGATE_SYNTAX_ERRORS', 0) or 0),
+    'duration_secs':        duration,
+    'warn_count':           stats.get('warn_count', 0),
     'search_replace_fails': stats.get('search_replace_fails', 0),
+    'adaptations':          adaptations,
 }
 entry.update(stats)
 
@@ -400,15 +424,42 @@ ti = entry.get('tokens_in', 0)
 to = entry.get('tokens_out', 0)
 entry['cost_claude_eq'] = round((ti * 3.0 + to * 15.0) / 1_000_000, 6)
 
-# True when Vibe ran tool calls but wrote nothing (vague prompt or task already done).
-# Excluded for read-only agents that intentionally never write files.
+# failure_reason: specific classification of run outcome (more precise than wrote_nothing).
+# silent_exit   — vibe never engaged: 0 tokens, 0 tool calls (immediate exit or auth failure)
+# near_empty    — minimal output (<50 tokens), nothing written (scaffold header only)
+# wrote_nothing — had tool calls but wrote no files (prompt too vague or task already done)
+# timeout / exit_error / syntax_error / sr_fail — other failure modes
+# warn_only     — completed with non-fatal warnings
+# ok            — clean run
 _readonly_agents = ('code-reviewer', 'code-architect', 'planner')
-entry['wrote_nothing'] = (
-    entry.get('files_changed', 0) == 0
-    and entry.get('tool_calls', 0) >= 3
-    and entry.get('exit_code', 0) == 0
-    and entry.get('agent', 'default') not in _readonly_agents
-)
+_tok_out  = entry.get('tokens_out', 0) or 0
+_tc       = entry.get('tool_calls', 0) or 0
+_fc       = entry.get('files_changed', 0) or 0
+_exit     = entry.get('exit_code', 0)
+_agent    = entry.get('agent', 'default')
+
+if entry.get('timed_out'):
+    _reason = 'timeout'
+elif _exit not in (0, 124):
+    _reason = 'exit_error'
+elif entry.get('syntax_errors', 0) > 0:
+    _reason = 'syntax_error'
+elif entry.get('search_replace_fails', 0) > 0:
+    _reason = 'sr_fail'
+elif _tok_out == 0 and _tc == 0 and _agent not in _readonly_agents:
+    _reason = 'silent_exit'
+elif _tok_out < 50 and _fc == 0 and _tc < 3 and _agent not in _readonly_agents:
+    _reason = 'near_empty'
+elif _fc == 0 and _tc >= 3 and _exit == 0 and _agent not in _readonly_agents:
+    _reason = 'wrote_nothing'
+elif entry.get('warn_count', 0) > 0:
+    _reason = 'warn_only'
+else:
+    _reason = 'ok'
+
+entry['failure_reason'] = _reason
+# wrote_nothing kept for backwards compat with older delegate-report versions
+entry['wrote_nothing'] = _reason in ('wrote_nothing', 'silent_exit', 'near_empty')
 
 with open(LOG, 'a') as f:
     f.write(json.dumps(entry) + '\n')
@@ -416,7 +467,9 @@ with open(LOG, 'a') as f:
 tok = entry.get('tokens_total', '?')
 saved = entry['cost_claude_eq'] - entry.get('cost_usd', 0)
 saved_str = f', saved ~${saved:.4f} vs Claude' if saved > 0 else ''
-print(f'[log] → {LOG}  ({tok} tokens, exit {entry["exit_code"]}, {duration}s{saved_str})')
+adapt_str = f'  [{",".join(adaptations)}]' if adaptations else ''
+reason_str = f'  {_reason}' if _reason != 'ok' else ''
+print(f'[log] → {LOG}  ({tok} tokens, exit {_exit}, {duration}s{saved_str}{reason_str}{adapt_str})')
 PYLOG
 
 exit $VIBE_EXIT

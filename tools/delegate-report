@@ -194,23 +194,53 @@ def show_by_project(runs):
 # ── Failure classification ────────────────────────────────────────────────────
 
 FAIL_INFO = {
-    'timeout':  ('Context saturated or task too large',
-                 'Decompose into sub-tasks; reduce --max-turns to ≤8'),
-    'exit_err': ('Vibe verification failed or crashed',
-                 'Read git diff; understand partial work before relaunching'),
-    'syntax':   ('Vibe wrote syntactically invalid code',
-                 'Run py_compile/node --check; fix manually before committing'),
-    'sr_fail':  ('search_replace match failed — UTF-8 or wrong context',
-                 'Use python str.replace() for accented chars; verify exact match'),
-    'empty':    ('Vibe ran tool calls but wrote nothing',
-                 'Grep for target first; rephrase prompt as an imperative verb'),
-    'warn':     ('Non-fatal tool errors during run',
-                 'Check [WARN] lines in run output; may still be correct'),
+    'timeout':       ('Context saturated or task too large',
+                      'Decompose into sub-tasks; reduce --max-turns to ≤8'),
+    'exit_err':      ('Vibe verification failed or crashed',
+                      'Read git diff; understand partial work before relaunching'),
+    'exit_error':    ('Vibe verification failed or crashed',
+                      'Read git diff; understand partial work before relaunching'),
+    'syntax':        ('Vibe wrote syntactically invalid code',
+                      'Run py_compile/node --check; fix manually before committing'),
+    'syntax_error':  ('Vibe wrote syntactically invalid code',
+                      'Run py_compile/node --check; fix manually before committing'),
+    'sr_fail':       ('search_replace match failed — UTF-8 or wrong context',
+                      'Use python str.replace() for accented chars; verify exact match'),
+    'silent_exit':   ('Vibe exited immediately — 0 tokens, 0 tool calls',
+                      'Check auth/API key; run a short test prompt; verify vibe CLI works'),
+    'near_empty':    ('Vibe returned scaffold header only — output < 50 tokens',
+                      'Prompt may be too short; add explicit file target and task verb'),
+    'empty':         ('Vibe ran tool calls but wrote nothing',
+                      'Grep for target first; rephrase prompt as an imperative verb'),
+    'wrote_nothing': ('Vibe ran tool calls but wrote nothing',
+                      'Grep for target first; rephrase prompt as an imperative verb'),
+    'warn_only':     ('Non-fatal tool errors during run',
+                      'Check [WARN] lines in run output; may still be correct'),
+    'warn':          ('Non-fatal tool errors during run',
+                      'Check [WARN] lines in run output; may still be correct'),
+}
+
+# Canonical failure type names (new format) → display codes (backwards compat)
+_REASON_DISPLAY = {
+    'silent_exit':  'silent_exit',
+    'near_empty':   'near_empty',
+    'wrote_nothing':'wrote_nothing',
+    'exit_error':   'exit_err',
+    'syntax_error': 'syntax',
+    'sr_fail':      'sr_fail',
+    'warn_only':    'warn',
+    'timeout':      'timeout',
+    'ok':           None,
 }
 
 
 def classify_fail(r):
     """Return primary failure type code, or None if run was clean."""
+    # Use logged failure_reason when available (new log format)
+    fr = r.get('failure_reason')
+    if fr:
+        return _REASON_DISPLAY.get(fr, fr) if fr != 'ok' else None
+    # Legacy: derive from individual flag fields
     if r.get('timed_out'):
         return 'timeout'
     if r.get('exit_code', 0) not in (0, 124):
@@ -227,6 +257,12 @@ def classify_fail(r):
 
 
 def is_notable(r, include_warns=False):
+    fr = r.get('failure_reason', '')
+    if fr and fr not in ('ok', 'warn_only'):
+        return True
+    if fr == 'warn_only' and include_warns:
+        return True
+    # Legacy fallback
     return (
         r.get('exit_code', 0) != 0
         or r.get('syntax_errors', 0) > 0
@@ -236,6 +272,45 @@ def is_notable(r, include_warns=False):
     )
 
 
+def show_adaptations(runs):
+    """Failure rate broken down by prompt adaptation flags."""
+    # Only runs that have adaptation data
+    adapted = [r for r in runs if 'adaptations' in r and not is_manual(r)]
+    if not adapted:
+        print("ADAPTATIONS  (no runs with adaptation data yet)")
+        print()
+        return
+
+    # Build all adaptation combos present
+    from itertools import combinations as _comb
+    combo_runs = defaultdict(list)
+    for r in adapted:
+        key = tuple(sorted(r.get('adaptations', []))) or ('none',)
+        combo_runs[key].append(r)
+
+    print("ADAPTATIONS  (failure rate by prompt adaptation)")
+    headers = ["Adaptations", "Runs", "OK%", "silent_exit", "near_empty", "wrote_nothing", "other_fail"]
+    rows = []
+    for combo, crs in sorted(combo_runs.items(), key=lambda x: -len(x[1])):
+        ok = sum(1 for r in crs if classify_fail(r) is None)
+        counts = defaultdict(int)
+        for r in crs:
+            t = classify_fail(r)
+            if t:
+                counts[t] += 1
+        silent  = counts.get('silent_exit', 0)
+        near    = counts.get('near_empty', 0)
+        wrote   = counts.get('wrote_nothing', 0) + counts.get('empty', 0)
+        other   = sum(v for k, v in counts.items()
+                      if k not in ('silent_exit', 'near_empty', 'wrote_nothing', 'empty'))
+        rows.append([
+            '+'.join(combo), len(crs), fmt_pct(ok, len(crs)),
+            silent or '.', near or '.', wrote or '.', other or '.',
+        ])
+    print_table(headers, rows)
+    print()
+
+
 def show_fails_by_model(fails):
     """Benchmark table: failures broken down by model."""
     by_model = defaultdict(list)
@@ -243,7 +318,7 @@ def show_fails_by_model(fails):
         by_model[r.get('model', 'unknown')].append(r)
 
     print("FAILURES BY MODEL  (benchmark)")
-    headers = ["Model", "Fails", "Timeout", "exit_err", "syntax", "sr_fail", "empty", "warn"]
+    headers = ["Model", "Fails", "Timeout", "exit_err", "syntax", "sr_fail", "silent", "empty", "warn"]
     rows = []
     for model, mrs in sorted(by_model.items(), key=lambda x: -len(x[1])):
         counts = defaultdict(int)
@@ -254,11 +329,12 @@ def show_fails_by_model(fails):
         rows.append([
             model, len(mrs),
             counts['timeout'] or ".",
-            counts['exit_err'] or ".",
-            counts['syntax'] or ".",
+            counts['exit_err'] or counts['exit_error'] or ".",
+            counts['syntax'] or counts['syntax_error'] or ".",
             counts['sr_fail'] or ".",
-            counts['empty'] or ".",
-            counts['warn'] or ".",
+            counts['silent_exit'] or ".",
+            counts['empty'] or counts['wrote_nothing'] or counts['near_empty'] or ".",
+            counts['warn'] or counts['warn_only'] or ".",
         ])
     print_table(headers, rows)
     print()
@@ -311,6 +387,7 @@ def main():
     ap.add_argument('--since', type=int, metavar='DAYS', help='Last N days only')
     ap.add_argument('--project', metavar='NAME', help='Filter by project name')
     ap.add_argument('--fails', action='store_true', help='Show only failures and issues')
+    ap.add_argument('--adapt', action='store_true', help='Show failure rates by prompt adaptation')
     args = ap.parse_args()
 
     runs = load_runs(args.since, args.project)
@@ -320,6 +397,11 @@ def main():
 
     if args.fails:
         show_fails(runs, limit=50, include_warns=True, benchmark=True)
+        return
+
+    if args.adapt:
+        show_adaptations(runs)
+        show_fails(runs, limit=20, include_warns=False, benchmark=False)
         return
 
     show_overview(runs)
