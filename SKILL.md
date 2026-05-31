@@ -264,6 +264,7 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 - **Max 3 attempts** per sub-task before escalating to the user.
 - Between attempts, **read the git diff** to avoid doubling partial work.
 - If Vibe completed ≥50% and crashed: finish the rest manually rather than relaunching.
+- **After finishing manually:** run `python3 tools/log-manual.py` to log the intervention — keeps `/vibe-report` cost accounting accurate.
 
 ---
 
