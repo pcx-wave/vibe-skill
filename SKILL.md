@@ -195,7 +195,7 @@ A grep is reliable. A file re-read may miss content outside the read window.
 | `agent`        | *(none)* | See agent table below                           |
 | `timeout-secs` | `180`    | Wall-clock kill timer                           |
 
-The script allocates a pseudo-TTY via `script` (required — vibe hangs without one).
+The script allocates a pseudo-TTY via Python's `pty.spawn` (required — vibe hangs without one).
 
 **Available agents:**
 

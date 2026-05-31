@@ -8,6 +8,11 @@
 #   silent timeout. Fix: wrap vibe in `script -q -c "..." /dev/null` to allocate
 #   a pseudo-TTY. The JSON streaming output is then piped cleanly to the parser.
 #
+# TTY ALLOCATION (2026-05-23):
+#   Superseded the `script` wrapper above with python3 pty.spawn — more portable
+#   (no GNU/BSD flag differences) and works even without a parent controlling TTY.
+#   See the SCRIPT_CMD definition below for the current implementation.
+#
 # PROMPT SAFETY (2026-05-12):
 #   Long prompts with Python code, dicts, colons, emojis, or accented chars are
 #   passed via a temp file (read by vibe via --prompt-file if supported, else via

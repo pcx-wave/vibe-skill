@@ -74,6 +74,76 @@ Mitigations:
 - One change per run — multi-edit prompts cause context drift and empty runs
 - For HTML/JS content: write to `/tmp` first, tell Vibe to read that file
 
+### Delegation synthesis — as of 2026-05-30
+
+Snapshot over **2,103 vibe delegations**, 2026-05-12 → 2026-05-30 (19 days). Pulled from the shared run log via `delegate-report` (vibe scope).
+
+**Performance & savings**
+
+| Metric | Value |
+|---|---|
+| Delegations | 2,103 |
+| Tokens delegated | 139.8M |
+| Exit-success rate | 81% |
+| Clean rate (no soft failure) | 67% |
+| Paid (provider API rates) | $174.28 |
+| Claude Sonnet 4.6 equivalent | $456.94 |
+| **Saved vs Claude** | **$282.66 (62% cheaper)** |
+| Avg run duration | 33s |
+
+> The 81% vs 67% gap is *soft* failures — runs that exit 0 but write nothing or miss a `search_replace`. Exit code alone overstates real success; see the error table below.
+>
+> Cost caveat: 104M of the 139.8M tokens ran on `mistral-medium-3.5`, billed here at API rates ($137). Under a Le Chat Pro subscription (~$18/mo, ~1B tokens included) that volume is effectively flat-rate — real out-of-pocket would be far lower and savings correspondingly higher.
+
+**By model**
+
+| Model | Runs | Exit-ok | Avg dur | Tokens | Paid | Saved vs Claude |
+|---|---|---|---|---|---|---|
+| mistral-medium-3.5 | 1,718 | 79% | 31s | 104.2M | $137.09 | $206.24 |
+| deepseek-flash | 269 | 93% | 41s | 32.1M | $35.43 | $67.12 |
+| devstral-small | 68 | 63% | 19s | 2.6M | $0.26 | $7.81 |
+| mistral (Le Chat) | 48 | 95% | 43s | 0.9M | $1.49 | $1.49 |
+
+`deepseek-flash` is the value pick (93% exit-ok at ~$0.13/run). `devstral-small` underperforms (63%) — it is an agent-mode model and fits the inline-edit delegation pattern poorly; prefer it only for read/explore.
+
+**Error rate** (real projects, 1,964 runs — synthetic test scaffolds excluded)
+
+| Class | Rate | What it is |
+|---|---|---|
+| clean ok | 67.1% | completed and wrote files |
+| `exit_error` | 18.7% | engaged (~7 tool calls) then exited non-zero, **95% wrote nothing** |
+| `wrote_nothing` | 7.1% | tool calls but 0 files, exit 0 |
+| `warn_only` | 2.5% | non-fatal warnings, usually fine |
+| `sr_fail` | 2.4% | `search_replace` byte-match miss (accents, backticks) |
+| `near_empty` | 1.6% | <50 tokens out, nothing written |
+| `syntax_error` | 0.4% | wrote invalid code (caught by post-run gate) |
+| `timeout` | 0.3% | task too large / context saturated |
+
+**`exit_error` + `wrote_nothing` (≈26%) share one root cause:** vibe engages but lands no edit — multi-edit context drift, or the first `search_replace` target isn't found byte-for-byte and the run abandons. This is the single biggest reliability lever.
+
+**Will the recent fixes reduce these?** Honest read:
+
+- **`failure_reason` taxonomy** — *measurement*, not prevention. Its value is making the previously-invisible `silent_exit`/`near_empty` class visible (the old `wrote_nothing` flag only fired at ≥3 tool calls).
+- **`contract` adaptation** (typed signature in prompt) — reduces *wrong-interface* implementations, which exit 0 and never appear in the error table. Improves correctness, won't move the logged error rate.
+- **`output_format` adaptation** (receipt block) — lets Claude verify the result without re-reading the file, cutting redundant "vibe wrote nothing, I'll redo it myself" manual loops. Reduces *wasted correction cost*, not vibe's own failure rate.
+- The dominant `exit_error` class is bound by model capability and task size; it's addressed by the existing **decompose + grep-the-target-first** discipline, not by the new adaptations.
+
+Net: expect the fixes to improve *visibility*, *perceived reliability*, and *correctness* — but not to materially move the ~19% `exit_error` rate. The `/vibe-report --adapt` view is the mechanism to prove or disprove adaptation impact once enough adapted runs accumulate (currently 0 — the tracking shipped after this snapshot).
+
+**Versus the other delegate (`opencode`)**
+
+| | vibe | opencode |
+|---|---|---|
+| Runs | 2,103 | 254 |
+| Tokens | 139.8M | 8.5M |
+| Exit-ok | 81% | 81% |
+| Paid | $174.28 | $0 (free tiers) |
+| Models | mistral-medium, deepseek-flash (paid, capable) | free deepseek / mimo / nemotron tiers |
+
+Same headline exit-rate, very different profile: `opencode` runs free model tiers at zero cost but with high `silent_exit` (model returns nothing) and timeout rates (e.g. nemotron timed out on 31 of 50 runs). It's economical for cheap bulk exploration; vibe's paid models are the choice when the edit has to actually land. Both write to the same log, so `/vibe-report --all` compares them directly.
+
+---
+
 **Context window protection** — On long coding sessions, every file read, function body, and debug loop burns Claude's context. Delegating to Vibe keeps that budget free. Claude enters the task, hands off, and comes back only to review the result — no context bleed from Vibe's internal turns.
 
 **Built-in quality gate** — Claude doesn't just fire and forget. After each Vibe run, Claude reads the `git diff`, checks for syntax errors, and summarizes what changed before reporting back to you. You get a second pair of eyes on every delegation without lifting a finger.
@@ -257,8 +327,7 @@ Claude Code
             └─ ~/tools/vibe-delegate <workdir> <prompt> [turns] [agent] [timeout]
                  ├─ writes prompt to temp file (avoids shell injection with UTF-8/emoji)
                  ├─ generates a temp shell script for the vibe command
-                 ├─ runs: script -q -c "<vibe-script>" /dev/null (Linux)
-                 │        or script -q /dev/null "<vibe-script>" (macOS)
+                 ├─ runs: python3 -c 'pty.spawn(<vibe-script>)'
                  │         └─ allocates pseudo-TTY (required — vibe hangs without one)
                  ├─ pipes JSON streaming output through Python parser
                  │         └─ prints [read] / [write] / [WARN] / [vibe] lines
@@ -268,7 +337,7 @@ Claude Code
                  └─ appends JSON entry to ~/.local/share/delegate-runs.jsonl
 ```
 
-The `script ... /dev/null` trick allocates a pseudo-TTY on both Linux and macOS; prompt via temp file avoids shell injection with UTF-8/emoji.
+Python's `pty.spawn` allocates a pseudo-TTY — portable across Linux and macOS, and it works even when the parent process has no controlling TTY (unlike the `script` command, which the delegate originally used); prompt via temp file avoids shell injection with UTF-8/emoji.
 
 **Shell vs Python split** — `vibe-delegate` started as pure shell. Python is now embedded in four places where shell falls short:
 
