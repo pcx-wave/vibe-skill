@@ -103,7 +103,7 @@ The token-share and cost-share columns are almost **inverted** — that inversio
 
 - **Cache hits: 89% of tokens, only 12% of cost.** The same files and system prompt resent every turn, served at 1/50th the price — effectively free volume.
 - **Cache misses: ~10% of tokens, but 67% of cost.** The *fresh* context you can't cache is the dominant cost driver, despite being a sliver of the tokens.
-- **Output: 1.6% of tokens, but 21% of cost.** Tiny in volume, yet the #2 cost component — because output is the **most expensive token type** ($0.28/M, 100× a cache hit, 2× a miss). Generating code isn't free; there's just very little of it.
+- **Output: 1.6% of tokens, but 21% of cost.** A small count of the **most expensive token type** ($0.28/M — 100× a cache hit, 2× a miss). It's the deliverable, and it's a real fifth of the bill.
 - **~60:1 input:output** overall — coding delegation is dominated by *reading and re-sending context*, but the small output you do generate is priced at a premium.
 
 This shape looks **stable across models and workloads** (a graph-backfill batch on the same account showed the same ~90%-cache, input-heavy profile).
@@ -112,9 +112,13 @@ This shape looks **stable across models and workloads** (a graph-backfill batch 
 
 **How to optimize, in priority order** — follow the cost%, not the token%:
 
-1. **Cut cache misses (67% of cost).** Keep context *stable* across a task so the prefix stays cached — atomic prompts, fixed file order, no churn that invalidates the cache. Every avoided cold re-read is the expensive 10%, not the cheap 90%.
-2. **Use a cache-aware cheap model + a harness that caches** (auto on DeepSeek/OpenAI; opt-in `cache_control` on Claude). Without caching this same workload costs ~7× more.
-3. **Don't chase output (21% of cost) — it's irreducible, not negligible.** It's a real fifth of the bill, but it *is* the deliverable (the code you asked for); trimming it means producing less or worse work. Optimize prompts for correctness, not for shaving the one token type you're actually paying to receive.
+1. **Cut cache misses (67% of cost).** Caching is **prefix-based** — a token is a hit only if everything before it is byte-identical to a recently-cached request. So:
+   - **Static content first, variable task last:** system prompt → tool defs → file context → the task. Anything that changes early invalidates the whole cache after it.
+   - **No cache-busters in the prefix** — no timestamps, UUIDs, or reordered instructions per call; keep the preamble byte-stable.
+   - **Batch tasks against the same repo back-to-back, within the cache TTL** (DeepSeek ~hours, OpenAI ~5–60 min, Claude 5 min–1 hr). Scattered calls go cold and pay the full miss each time.
+   - **Keep fresh per-task context small** — the miss is *only the new bytes*. Don't switch models mid-batch (separate caches).
+2. **Use a cache-aware cheap model + a harness that caches** (auto on DeepSeek/OpenAI; opt-in `cache_control` on Claude). This is the big win — without caching the same workload costs ~7× more. (vibe already runs ~90% hit, so #1 is fine-tuning; #2 is the order-of-magnitude lever.)
+3. **Don't chase output (21% of cost) — it's irreducible, not negligible.** A real fifth of the bill, but it *is* the deliverable; trimming it means producing less or worse work. Optimize prompts for correctness, not for shaving the one token type you're paying to receive.
 
 **By model**
 
