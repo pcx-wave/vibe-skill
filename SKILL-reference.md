@@ -1,6 +1,34 @@
 # Vibe — Reference
 
-Not loaded at runtime. Use when querying or debugging `delegate-runs.jsonl`.
+Not loaded at runtime. Read this file when troubleshooting, querying logs, or looking up full details for items summarised in SKILL.md.
+
+## Known Limits — Full Details
+
+### 1. UTF-8 / special chars cause `search_replace` failures
+Vibe's `search_replace` matches byte-for-byte. Accented chars, curly quotes, or emoji in `old_string` → silent match failure, no write. Use `python3 str.replace()` for those edits, or restructure the prompt to avoid them.
+
+### 2. Code duplication bug
+Vibe sometimes re-inserts a block already written (off-by-one in its diff logic). Check for duplicate function definitions or repeated class bodies after every run.
+
+### 3. Orchestration chain — 6 independent failure points
+`vibe CLI → pseudo-TTY (script) → Python stream parser → TOML pricing lookup → git diff → JSON log`
+
+| Link | Failure mode | Symptom |
+|------|-------------|---------|
+| Vibe CLI | Auth expired, update broke API | Immediate exit, no output |
+| pseudo-TTY | Platform difference (GNU vs BSD flags) | Hangs silently or garbled output |
+| Stream parser | Vibe changes its JSON schema | Tool calls not detected, wrong token count |
+| TOML pricing | `config.toml` missing or renamed | Falls back to Mistral Medium 3.5 rates |
+| git diff | Not a git repo, or Vibe committed mid-run | Wrong file count, misleading stat |
+| JSON log | `~/.local/share/` not writable | Silent log skip, `/vibe-report` misses the run |
+
+### 4. Never pass source code through a bash heredoc
+Nested quotes, f-strings, or backslashes in inline bash `<< 'PYEOF'` mangle escaping. Use `search_replace` directly for ASCII code; write_file only if the new content is too long for the prompt. Never write a helper script whose sole job is `str.replace()` on another file.
+
+### 5. HTML tags in the prompt body cause shell redirect errors (exit 127)
+Tags like `<div>` are interpreted as file redirections. Write HTML/JSX content to a temp file first; reference the path in the prompt.
+
+---
 
 ---
 
@@ -32,7 +60,9 @@ Every run appends one JSON entry to `~/.local/share/delegate-runs.jsonl`.
 | `model` | string | Active model alias |
 | `warn_count` | int | `[WARN]` events during the run |
 | `search_replace_fails` | int | `search_replace [FAIL]` events |
-| `wrote_nothing` | bool | `true` if ≥3 tool calls but 0 files changed |
+| `wrote_nothing` | bool | `true` if ≥3 tool calls but 0 files changed (backwards compat) |
+| `failure_reason` | string | `ok` \| `silent_exit` \| `near_empty` \| `wrote_nothing` \| `timeout` \| `exit_error` \| `syntax_error` \| `sr_fail` \| `warn_only` |
+| `adaptations` | list | Prompt adaptations detected: `contract` \| `output_format` \| `compact` |
 
 ---
 

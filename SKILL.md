@@ -87,53 +87,13 @@ to Mistral Vibe via its programmatic mode, supervises in real time, and reports.
 
 ## Known Limits
 
-Hard constraints of Mistral Vibe CLI — not config options.
+Hard constraints — not config options. Full details in `SKILL-reference.md`.
 
-### 1. UTF-8 / special chars cause `search_replace` failures
-Vibe's `search_replace` tool matches byte-for-byte. Accented chars, curly quotes,
-or emoji in `old_string` → silent match failure, no write. Workaround: use
-`python3 str.replace()` for those edits, or restructure the prompt to avoid them.
-
-### 2. Code duplication bug
-Vibe sometimes re-inserts a block it has already written (off-by-one in its diff
-logic). Check for duplicate function definitions or repeated class bodies after
-every run.
-
-### 3. Orchestration chain has 6 independent failure points
-The delegation pipeline is: `vibe CLI → pseudo-TTY (script) → Python stream parser →
-TOML pricing lookup → git diff → JSON log`. Each link can fail independently:
-
-| Link | Failure mode | Symptom |
-|------|-------------|---------|
-| Vibe CLI | Auth expired, update broke API | Immediate exit, no output |
-| pseudo-TTY (`script`) | Platform difference (GNU vs BSD flags) | Hangs silently or garbled output |
-| Stream parser | Vibe changes its JSON schema | Tool calls not detected, wrong token count |
-| TOML pricing | `config.toml` missing or renamed | Falls back to Mistral Medium 3.5 rates |
-| git diff | Not a git repo, or Vibe committed mid-run | Wrong file count, misleading stat |
-| JSON log | `~/.local/share/` not writable | Silent log skip, `/vibe-report` misses the run |
-
-When a run produces unexpected results, check these links in order from top to bottom.
-
-### 4. Never pass source code through a bash heredoc
-Nested quotes, f-strings, or backslashes in inline bash `<< 'PYEOF'` mangle escaping.
-- ASCII code: use `search_replace` directly.
-- Content too long for inline: ask Vibe to write to `/tmp/new.py`, then `search_replace` via `open('/tmp/new.py').read()`.
-- Never write a helper script whose sole job is `str.replace()` on another file.
-
-### 5. HTML tags in the prompt body cause shell redirect errors (exit 127)
-`<div>`, `</div>`, `<span>` etc. embedded in the prompt string are interpreted by
-bash as file redirections. `div` is not a command → "No such file or directory", exit 127.
-**Rule:** if the prompt references or contains any HTML — even in a quoted description —
-write the content to a temp file first:
-```bash
-cat > /tmp/new_block.html << 'EOF'
-<div class="map-sidebar">...</div>
-EOF
-```
-Then reference it in the prompt: "Replace the sidebar block in `templates/map.html`
-with the content of `/tmp/new_block.html`." Vibe reads it with `read_file`, no shell parsing.
-
-This also applies to JS files containing template literals (backticks) or JSX-like syntax.
+- **UTF-8 / special chars** → silent `search_replace` match failure. Use `python3 str.replace()` for accented chars or emoji.
+- **Code duplication** → Vibe may re-insert a block already written. Grep for duplicate definitions after every run.
+- **HTML in prompt** → tags like `<div>` are shell redirects (exit 127). Write HTML content to a temp file; reference the path in the prompt.
+- **Source code in bash heredoc** → quotes/backslashes mangle. Use `search_replace` directly; never a helper script that replaces code.
+- **Orchestration chain** → 6 failure points (CLI → TTY → parser → pricing → git → log). Unexpected results: check in that order.
 
 ---
 
@@ -191,15 +151,9 @@ VERIFY: grep for "def function_name" in file.py and confirm it exists.
 - Include a grep-based verification criterion (not a file re-read)
 - Language: English (better Mistral performance)
 
-**Prompt adaptations (tracked per-run — use `/vibe-report --adapt` to see impact over time):**
-
-| Adaptation | When | How |
-|---|---|---|
-| `contract` | Any task C3+ (endpoint, async refactor, cache layer) | Include exact signature: `def validate(data: dict) -> tuple[bool, list[str]]:` |
-| `output_format` | Any write/modify task | Append `OUTPUT FORMAT:\nModified: <file>\nDoes: <one line>\nNo other prose.` |
-| `compact` | Short standalone tasks | Keep under 80 words — reduces delegate-side context tokens |
-
-The `contract` adaptation recovers +14–27% functional pass-rate at C3–C4 by removing interface ambiguity before the run starts (measured, handoff-probe). The log records which adaptations were active per run.
+**Prompt adaptations** (auto-detected and logged per-run; `/vibe-report --adapt` shows impact):
+- **C3+ tasks**: include the exact function signature (`def f(data: dict) -> tuple[bool, list[str]]:`). Recovers +14–27% pass-rate at C3–C4 by removing interface ambiguity.
+- **Write/modify tasks**: append `OUTPUT FORMAT:\nModified: <file>\nDoes: <one line>\nNo other prose.` — lets Claude verify without re-reading the file.
 
 > ⚠️ **Shell safety**: if the prompt contains UTF-8 accented chars, emojis,
 > `:` in Python/YAML code, or typographic apostrophes — the vibe-delegate script
@@ -311,16 +265,6 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 - Between attempts, **read the git diff** to avoid doubling partial work.
 - If Vibe completed ≥50% and crashed: finish the rest manually rather than relaunching.
 
-## Step 6b — Log manual completion
-
-When you finish a task manually (after Vibe failures), run this immediately after editing:
-
-```bash
-python3 tools/log-manual.py
-```
-
-Script source: see `SKILL-reference.md` — Manual Completion Logging.
-
 ---
 
 ## Step 7 — Report to the user
@@ -364,15 +308,11 @@ Log fields and jq queries → see `SKILL-reference.md`.
 ~/tools/delegate-report                  # full report
 ~/tools/delegate-report --since 7        # last 7 days
 ~/tools/delegate-report --project myapp  # filter by project
-~/tools/delegate-report --fails          # failures only (with benchmark by model)
+~/tools/delegate-report --fails          # failures only
 ~/tools/delegate-report --adapt          # failure rates by prompt adaptation
 ```
 
-Or via Claude Code: `/vibe-report [args]`
-
-**New log fields (added 2026-05-31):**
-- `failure_reason` — specific outcome: `ok` | `silent_exit` | `near_empty` | `wrote_nothing` | `timeout` | `exit_error` | `syntax_error` | `sr_fail` | `warn_only`
-- `adaptations` — list of prompt adaptations active for this run: `contract` | `output_format` | `compact`
+Or via Claude Code: `/vibe-report [args]`. Log fields and jq queries → `SKILL-reference.md`.
 
 ---
 
