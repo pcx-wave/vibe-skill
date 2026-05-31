@@ -153,7 +153,7 @@ VERIFY: grep for "def function_name" in file.py and confirm it exists.
 - Language: English (better Mistral performance)
 
 **Prompt adaptations** — use these to improve first-pass success:
-- **Any function task (C3+)**: include the exact signature in the prompt — `def validate(data: dict) -> tuple[bool, list[str]]:`. Prevents the model implementing the wrong interface.
+- **Any task that defines or calls a specific function**: include the exact signature in the prompt — `def validate(data: dict) -> tuple[bool, list[str]]:`. Prevents the model implementing the wrong interface.
 - **Write/modify tasks**: append an output format block so Claude can verify without re-reading the file:
   ```
   OUTPUT FORMAT:
