@@ -53,6 +53,7 @@ extracted from the arguments, display output verbatim, and stop.
 | "last 30 days", "30d" | `--since 30` |
 | "project foo" | `--project foo` |
 | "only failures", "fails", "bugs" | `--fails` |
+| "adapt", "adaptations", "by adaptation" | `--adapt` |
 | (nothing) | (no flags — full report) |
 
 ---
@@ -93,7 +94,7 @@ Hard constraints — not config options. Full details in `SKILL-reference.md`.
 - **Code duplication** → Vibe may re-insert a block already written. Grep for duplicate definitions after every run.
 - **HTML in prompt** → tags like `<div>` are shell redirects (exit 127). Write HTML content to a temp file; reference the path in the prompt.
 - **Source code in bash heredoc** → quotes/backslashes mangle. Use `search_replace` directly; never a helper script that replaces code.
-- **Orchestration chain** → 6 failure points (CLI → TTY → parser → pricing → git → log). Unexpected results: check in that order.
+- **Orchestration chain** → 6 failure points in order: CLI auth → pseudo-TTY → stream parser → TOML pricing → git diff → JSON log. When a run produces unexpected results (wrong token count, missing log entry, bad diff), work down this list. Full details in `SKILL-reference.md`.
 
 ---
 
@@ -151,9 +152,15 @@ VERIFY: grep for "def function_name" in file.py and confirm it exists.
 - Include a grep-based verification criterion (not a file re-read)
 - Language: English (better Mistral performance)
 
-**Prompt adaptations** (auto-detected and logged per-run; `/vibe-report --adapt` shows impact):
-- **C3+ tasks**: include the exact function signature (`def f(data: dict) -> tuple[bool, list[str]]:`). Recovers +14–27% pass-rate at C3–C4 by removing interface ambiguity.
-- **Write/modify tasks**: append `OUTPUT FORMAT:\nModified: <file>\nDoes: <one line>\nNo other prose.` — lets Claude verify without re-reading the file.
+**Prompt adaptations** — use these to improve first-pass success:
+- **Any function task (C3+)**: include the exact signature in the prompt — `def validate(data: dict) -> tuple[bool, list[str]]:`. Prevents the model implementing the wrong interface.
+- **Write/modify tasks**: append an output format block so Claude can verify without re-reading the file:
+  ```
+  OUTPUT FORMAT:
+  Modified: <file>
+  Does: <one line>
+  No other prose.
+  ```
 
 > ⚠️ **Shell safety**: if the prompt contains UTF-8 accented chars, emojis,
 > `:` in Python/YAML code, or typographic apostrophes — the vibe-delegate script
