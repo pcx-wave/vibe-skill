@@ -121,14 +121,14 @@ Snapshot over **2,103 vibe delegations**, 2026-05-12 → 2026-05-30 (19 days). P
 
 **`exit_error` + `wrote_nothing` (≈26%) share one root cause:** vibe engages but lands no edit — multi-edit context drift, or the first `search_replace` target isn't found byte-for-byte and the run abandons. This is the single biggest reliability lever.
 
-**Will the recent fixes reduce these?** Honest read:
+**Fixes shipped after this snapshot (2026-05-31)** to attack the above — impact to be measured in the next snapshot:
 
-- **`failure_reason` taxonomy** — *measurement*, not prevention. Its value is making the previously-invisible `silent_exit`/`near_empty` class visible (the old `wrote_nothing` flag only fired at ≥3 tool calls).
-- **`contract` adaptation** (typed signature in prompt) — reduces *wrong-interface* implementations, which exit 0 and never appear in the error table. Improves correctness, won't move the logged error rate.
-- **`output_format` adaptation** (receipt block) — lets Claude verify the result without re-reading the file, cutting redundant "vibe wrote nothing, I'll redo it myself" manual loops. Reduces *wasted correction cost*, not vibe's own failure rate.
-- The dominant `exit_error` class is bound by model capability and task size; it's addressed by the existing **decompose + grep-the-target-first** discipline, not by the new adaptations.
+- **`--require` target-presence gate** → the `exit_error` + `wrote_nothing` cluster (~26%): aborts before launch when the `search_replace` anchor isn't in the file, so a doomed run never runs (logged as cheap `precheck_abort` instead of a wasted `exit_error`).
+- **Model routing** → model-mismatch `exit_error`: agent-mode `devstral-small` is kept to read/explore; inline edits go to `deepseek-flash` / `mistral-medium-3.5`.
+- **`failure_reason` taxonomy** → visibility: surfaces the silent `silent_exit` / `near_empty` failures the old flag missed.
+- **`contract` / `output_format` adaptations** → correctness and the "vibe wrote nothing, I'll redo it" loop; left off-by-default until `/vibe-report --adapt` has enough runs to prove they help.
 
-Net: expect the fixes to improve *visibility*, *perceived reliability*, and *correctness* — but not to materially move the ~19% `exit_error` rate. The `/vibe-report --adapt` view is the mechanism to prove or disprove adaptation impact once enough adapted runs accumulate (currently 0 — the tracking shipped after this snapshot).
+Effect is read straight from `/vibe-report` — `precheck_abort` displacing `exit_error`, and the `--adapt` cohort once it fills. See [`docs/error-reduction.md`](docs/error-reduction.md) for the full plan.
 
 **Versus the other delegate (`opencode`)**
 
