@@ -78,9 +78,9 @@ Works via `VIBE_ACTIVE_MODEL` env var, which Vibe respects over the config file.
 
 | Alias | Model | Provider | Notes |
 |-------|-------|----------|-------|
-| `deepseek-flash` | deepseek-v4-flash | DeepSeek | Default — fast, cheap |
-| `mistral-medium-3.5` | mistral-vibe-cli-latest | Mistral | Stronger reasoning |
-| `devstral-small` | devstral-small-latest | Mistral | Lighter Mistral model |
+| `deepseek-flash` | deepseek-v4-flash | DeepSeek | Default — fast, cheap; solid for inline edits |
+| `mistral-medium-3.5` | mistral-vibe-cli-latest | Mistral | Stronger reasoning; reliable for inline edits |
+| `devstral-small` | devstral-small-latest | Mistral | Agent-mode — read/explore only, weak at inline edits |
 | `local` | devstral (llamacpp) | Local | Requires local server on :8080 |
 
 Run the bash command, print one confirmation line showing the active model, and stop.
@@ -306,6 +306,7 @@ Ready to commit?
 - **Don't code instead of Vibe** unless Vibe completed ≥50% and crashed.
 - **Max 12 turns per call** — beyond that, Mistral context saturates.
 - **Grep target before delegating** — `grep -n "exact_target" file.py` before any `search_replace` prompt. No match = empty run. Pass that anchor as `--require "exact_target"` so the delegate aborts before launching if it's gone. Always use grep for VERIFY, not file re-read.
+- **Match model to task** — inline-edit tasks → `deepseek-flash` or `mistral-medium-3.5`; never route edits to agent-mode `devstral-small` (read/explore only).
 - **UTF-8 / emoji in the prompt** → the script handles it via temp file, but test with a short prompt first.
 - **After any run that touches imports: grep the import line** — sequential runs can revert each other's import changes. Always run `grep "^from X import" file.py` before the next sub-task.
 - **search_replace [OK] ≠ correct change** — Vibe may report OK even if the match was on unintended content. Always grep the specific changed line, not just check syntax.
