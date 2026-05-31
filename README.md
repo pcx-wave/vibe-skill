@@ -37,28 +37,29 @@ Summary:
 
 DeepSeek's headline input rate is $0.14/M — but that is the cache-**miss** rate. With
 prompt caching on iterative coding (the same file context resent across turns), real
-billed cost is far lower. Measured over this period: **$5.07 for 227M tokens ≈ $0.022/M
-blended**, because 90% of input was served from cache at $0.0028/M. At that rate
-DeepSeek-only stays cheaper than the Mistral Pro subscription (~$18/mo) until **~800M
+billed cost is far lower. Measured on the 269 vibe runs: **$0.67 for 32.1M tokens ≈ $0.021/M
+blended**, because ~90% of input was served from cache at $0.0028/M. At that rate
+DeepSeek-only stays cheaper than the Mistral Pro subscription (~$18/mo) until **~880M
 tokens/month**:
 
 ```
 tokens/month  │ DeepSeek only* │ Mistral Pro sub │ Verdict
 ──────────────┼────────────────┼─────────────────┼──────────────────────────
-  50M         │  $1.12         │  $18.36         │ DeepSeek cheaper
- 221M (now)   │  $4.93         │  $18.36         │ DeepSeek cheaper
- 500M         │  $11.15        │  $18.36         │ DeepSeek cheaper
- 820M         │  $18.30        │  $18.36         │ ← break-even
-   1B         │  $22.30        │  $18.36         │ Mistral Pro worth it
+  50M         │  $1.04         │  $18.36         │ DeepSeek cheaper
+ 221M (now)   │  $4.61         │  $18.36         │ DeepSeek cheaper
+ 500M         │  $10.44        │  $18.36         │ DeepSeek cheaper
+ 880M         │  $18.37        │  $18.36         │ ← break-even
+   1B         │  $20.87        │  $18.36         │ Mistral Pro worth it
 ```
 
 \* Assumes the ~90% cache-hit rate observed on iterative coding. One-off, diverse tasks
 cache less and trend toward the $0.14/M miss rate — at which break-even drops back to
 ~130M/month. So the honest range is **break-even somewhere between ~130M (cache-light)
-and ~800M (cache-heavy) tokens/month.**
+and ~880M (cache-heavy) tokens/month.**
 
-At the current ~221M/month on cache-heavy coding, DeepSeek-only (~$5) is well under the
-Mistral Pro sub — the *opposite* of what a cache-blind $0.14/M estimate would suggest.
+If you routed your whole ~221M/month delegation volume to DeepSeek, the cache-aware rate
+projects ~$5/mo — well under the Mistral Pro sub, and the *opposite* of what a cache-blind
+$0.14/M estimate ($31/mo) would suggest.
 Subscribe to Mistral Pro only once you are reliably above your break-even band, and use
 it until the quota (~1B–1.5B tokens) is exhausted. Never let Mistral roll into
 pay-as-you-go ($1.52/M blended).
@@ -76,16 +77,35 @@ Snapshot over **2,103 vibe delegations**, 2026-05-12 → 2026-05-30 (19 days). P
 | Exit-success rate | 81% |
 | Clean rate (no soft failure) | 67% |
 | Avg run duration | 33s |
-| **Actually paid** | **$5.07 DeepSeek (billed) + Le Chat Pro sub (~$18/mo)** |
+| **Actually paid** | **~$0.67 DeepSeek (32M tokens) + Le Chat Pro sub (~$18/mo)** |
 | Same workload on Claude Sonnet 4.6 | $456.94 |
-| **Effective saving** | **≈ 20× cheaper than Claude** |
+| **Effective saving** | **≈ 24× cheaper than Claude** |
 | Pay-as-you-go API equivalent | $174.28 *(reference only — not what was paid)* |
 
 > The 81% vs 67% gap is *soft* failures — runs that exit 0 but write nothing or miss a `search_replace`. Exit code alone overstates real success; see the error table below.
 >
-> **What this actually cost:** 104M of the 139.8M tokens ran on `mistral-medium-3.5` under a flat **Le Chat Pro subscription** (~$18/mo, ~1B-token quota — $0 marginal); the DeepSeek runs cost **$5.07**, verified from provider billing. The `$174.28` figure and the per-model "API-rate cost" column below are what the same volume *would* cost at pay-as-you-go rates — a model-comparison reference, **not money spent**. Against Claude's $456.94, real out-of-pocket (~$23 for the period) is roughly **20× cheaper**.
+> **What this actually cost:** 104M of the 139.8M tokens ran on `mistral-medium-3.5` under a flat **Le Chat Pro subscription** (~$18/mo, ~1B-token quota — $0 marginal); the 269 DeepSeek runs (32.1M tokens) cost **~$0.67**, from cache-aware provider billing. The `$174.28` figure and the per-model "API-rate cost" column below are what the same volume *would* cost at pay-as-you-go rates — a model-comparison reference, **not money spent**. Against Claude's $456.94, real out-of-pocket (~$19 for the period, almost entirely the flat sub) is roughly **24× cheaper**.
 >
-> **Why the log over-counts DeepSeek:** of DeepSeek's 221M input tokens, **90% were cache hits** at $0.0028/M (50× cheaper than the $0.14/M miss rate), so real cost was $5.07 — not the ~$35 the run log estimates. The log prices every input token at the full miss rate (no cache awareness), and runs logged before DeepSeek pricing was added used the Mistral fallback. Cache alone is a ~6× overstatement here. See [cost methodology](SKILL-reference.md#cost-estimate-methodology).
+> **Why the log over-counts DeepSeek:** the run log estimates ~$4.6 for those 32.1M tokens because it prices every input token at the full $0.14/M miss rate (no cache awareness). Real billing shows **~90% of input was cache hits** at $0.0028/M (50× cheaper), so the true cost was **~$0.67** — a ~7× overstatement by the log. See the token breakdown below and the [cost methodology](SKILL-reference.md#cost-estimate-methodology). *(A separate, much larger DeepSeek bill on the same account that month was an unrelated batch project, not delegation.)*
+
+**The token structure of delegated coding** — *and why delegation actually pays*
+
+DeepSeek's billing splits usage into cache-hit / cache-miss / output — detail most premium providers now expose too (OpenAI, Anthropic, Gemini all distinguish cached input). The 269 DeepSeek delegations broke down as:
+
+| Component | Tokens | Cost | Share |
+|---|---|---|---|
+| input — cache hit | ~28.5M | $0.08 | 89% of all tokens, ~1/50th price |
+| input — cache miss | ~3.2M | $0.44 | **the real cost driver** |
+| output (the code itself) | 0.5M | $0.14 | 1.6% of tokens |
+| **Total** | **32.1M** | **~$0.67** | |
+
+Three facts that define the economics — and look **stable across models and workloads** (a graph-backfill batch on the same account showed the same ~90%-cache, input-heavy shape):
+
+- **~60:1 input:output.** Coding delegation is dominated by *reading and re-sending context*, not generating code.
+- **~90% of input is cache hits** — the same files and system prompt resent every turn, served at 1/50th the price. The expensive ~10% is the *fresh* context you can't cache.
+- **Output — the actual code — is ~1.6% of tokens.** Writing the code is nearly free; the cost is context I/O.
+
+**So the real value of delegating is not "a cheaper model writes the code"** — the code is trivial to produce. It's **offloading the context-reading mountain.** You move ~32M tokens of mostly-cached context churn onto a sub-dollar delegate, and your premium orchestrator only pays to *read back the 0.5M-token result* — never to re-read the codebase 60× per task, and never filling its own context window. That's the lever, and it's why cache-aware cheap models (and a harness that lets them cache) beat raw model price every time on this workload.
 
 **By model**
 
@@ -96,9 +116,9 @@ Snapshot over **2,103 vibe delegations**, 2026-05-12 → 2026-05-30 (19 days). P
 | devstral-small | 68 | 63% | 19s | 2.6M | $0.26 | $7.81 |
 | mistral (Le Chat) | 48 | 95% | 43s | 0.9M | $1.49 | $1.49 |
 
-¹ Pay-as-you-go reference, not actual spend — mistral-medium ran on the Le Chat Pro sub; DeepSeek's real billed cost was **$5.07** (90% cache hits), not the cache-blind $35.43 shown here.
+¹ Pay-as-you-go reference, not actual spend — mistral-medium ran on the Le Chat Pro sub; DeepSeek's real billed cost was **~$0.67** (90% cache hits), not the cache-blind $35.43 shown here.
 
-`deepseek-flash` is the value pick (93% exit-ok at ~$0.13/run). `devstral-small` underperforms (63%) — it is an agent-mode model and fits the inline-edit delegation pattern poorly; prefer it only for read/explore.
+`deepseek-flash` is the value pick (93% exit-ok at ~$0.0025/run real). `devstral-small` underperforms (63%) — it is an agent-mode model and fits the inline-edit delegation pattern poorly; prefer it only for read/explore.
 
 **Error rate** (real projects, 1,964 runs — synthetic test scaffolds excluded)
 
