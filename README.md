@@ -103,18 +103,18 @@ The token-share and cost-share columns are almost **inverted** — that inversio
 
 - **Cache hits: 89% of tokens, only 12% of cost.** The same files and system prompt resent every turn, served at 1/50th the price — effectively free volume.
 - **Cache misses: ~10% of tokens, but 67% of cost.** The *fresh* context you can't cache is the dominant cost driver, despite being a sliver of the tokens.
-- **Output: 1.6% of tokens, 21% of cost.** The actual code is a rounding error in volume; writing it is nearly free.
-- **~60:1 input:output** overall — coding delegation is *reading and re-sending context*, not generating code.
+- **Output: 1.6% of tokens, but 21% of cost.** Tiny in volume, yet the #2 cost component — because output is the **most expensive token type** ($0.28/M, 100× a cache hit, 2× a miss). Generating code isn't free; there's just very little of it.
+- **~60:1 input:output** overall — coding delegation is dominated by *reading and re-sending context*, but the small output you do generate is priced at a premium.
 
 This shape looks **stable across models and workloads** (a graph-backfill batch on the same account showed the same ~90%-cache, input-heavy profile).
 
-**So the real value of delegating is not "a cheaper model writes the code"** — the code is trivial to produce. It's **offloading the context-reading mountain.** You move ~32M tokens of mostly-cached context churn onto a sub-dollar delegate, and your premium orchestrator only pays to *read back the 0.5M-token result* — never to re-read the codebase 60× per task, and never filling its own context window. That's the lever, and it's why cache-aware cheap models (and a harness that lets them cache) beat raw model price every time on this workload.
+**So the real value of delegating is offloading the context-reading mountain.** Two-thirds of the cost is *fresh context churn* (cache misses) and most of the rest is repeated context (hits) — together ~79% of cost is moving the codebase in and out, only ~21% is producing the answer. You shift all of that onto a sub-dollar delegate, and your premium orchestrator only pays to *read back the 0.5M-token result* — never to re-read the codebase 60× per task, and never filling its own context window. That's the lever, and it's why cache-aware cheap models (and a harness that lets them cache) beat raw model price every time on this workload.
 
 **How to optimize, in priority order** — follow the cost%, not the token%:
 
 1. **Cut cache misses (67% of cost).** Keep context *stable* across a task so the prefix stays cached — atomic prompts, fixed file order, no churn that invalidates the cache. Every avoided cold re-read is the expensive 10%, not the cheap 90%.
 2. **Use a cache-aware cheap model + a harness that caches** (auto on DeepSeek/OpenAI; opt-in `cache_control` on Claude). Without caching this same workload costs ~7× more.
-3. **Output (21% of cost) barely matters** — don't optimize prompt brevity for cost; optimize it for *correctness*. Saving output tokens saves cents.
+3. **Don't chase output (21% of cost) — it's irreducible, not negligible.** It's a real fifth of the bill, but it *is* the deliverable (the code you asked for); trimming it means producing less or worse work. Optimize prompts for correctness, not for shaving the one token type you're actually paying to receive.
 
 **By model**
 
