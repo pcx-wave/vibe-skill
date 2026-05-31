@@ -298,6 +298,8 @@ A parallel delegate using **Gemini CLI** is available at [pcx-wave/gemini-skill]
 
 Every run is logged to `~/.local/share/delegate-runs.jsonl` with tokens, cost, model, and failure details. Query it with `~/tools/delegate-report [--since N] [--project NAME] [--fails]` or from Claude Code: `/vibe-report [args]`.
 
+The log is shared with sister delegates (e.g. gemini-skill), so the report defaults to **vibe runs only**. Use `--all` for the cross-delegate comparison, or `--delegate NAME` to scope to another tool.
+
 ---
 
 ## Feedback

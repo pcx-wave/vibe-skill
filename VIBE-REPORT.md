@@ -18,4 +18,9 @@ Run `~/tools/delegate-report` with any flags extracted from the arguments and di
 | "project foo" | `--project foo` |
 | "only failures", "fails", "bugs" | `--fails` |
 | "adapt", "adaptations", "by adaptation" | `--adapt` |
-| (nothing) | (no flags — full report) |
+| "all delegates", "everything" | `--all` |
+| "delegate foo", "only opencode" | `--delegate foo` |
+| (nothing) | (no flags — vibe runs only) |
+
+Defaults to vibe runs only. The run log is shared across delegate tools; `--all`
+shows every delegate, `--delegate NAME` scopes to a specific one.

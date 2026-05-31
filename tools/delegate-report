@@ -13,7 +13,15 @@ from collections import defaultdict
 LOG = Path.home() / '.local' / 'share' / 'delegate-runs.jsonl'
 
 
-def load_runs(since_days=None, project=None):
+def load_runs(since_days=None, project=None, delegate='vibe'):
+    """Load runs from the shared log.
+
+    The log is shared across delegate tools (vibe, opencode, gemini, …).
+    `delegate` scopes the report:
+      'vibe' (default) → vibe runs + claude-manual interventions on vibe tasks
+      None             → every delegate (cross-delegate comparison)
+      '<name>'         → that delegate only
+    """
     if not LOG.exists():
         print(f"No log found at {LOG}")
         sys.exit(0)
@@ -29,6 +37,14 @@ def load_runs(since_days=None, project=None):
             r = json.loads(line)
         except Exception:
             continue
+        if delegate is not None:
+            dg = r.get('delegate', '')
+            if delegate == 'vibe':
+                # claude-manual rows are vibe-workflow interventions — keep them
+                if dg not in ('vibe', 'claude-manual'):
+                    continue
+            elif dg != delegate:
+                continue
         if project and r.get('project') != project:
             continue
         if cutoff:
@@ -90,7 +106,7 @@ def is_manual(r):
     return r.get('delegate') == 'claude-manual'
 
 
-def show_overview(runs):
+def show_overview(runs, scope='vibe only'):
     delegate_runs = [r for r in runs if not is_manual(r)]
     manual_runs   = [r for r in runs if is_manual(r)]
 
@@ -111,6 +127,7 @@ def show_overview(runs):
 
     print(f"\n{'=' * 56}")
     print(f"  DELEGATE REPORT{date_range(runs)}")
+    print(f"  Scope         : {scope}")
     print(f"{'=' * 56}")
     print(f"  Runs          : {total}  (ok: {ok}, failed: {total-ok}, timeout: {timeouts})")
     print(f"  Success rate  : {fmt_pct(ok, total)}")
@@ -388,23 +405,34 @@ def main():
     ap.add_argument('--project', metavar='NAME', help='Filter by project name')
     ap.add_argument('--fails', action='store_true', help='Show only failures and issues')
     ap.add_argument('--adapt', action='store_true', help='Show failure rates by prompt adaptation')
+    ap.add_argument('--all', action='store_true', help='Include all delegates, not just vibe')
+    ap.add_argument('--delegate', metavar='NAME', help='Filter to a specific delegate (e.g. vibe, opencode, gemini)')
     args = ap.parse_args()
 
-    runs = load_runs(args.since, args.project)
+    if args.all:
+        delegate, scope = None, 'all delegates'
+    elif args.delegate:
+        delegate, scope = args.delegate, f'{args.delegate} only'
+    else:
+        delegate, scope = 'vibe', 'vibe only'
+
+    runs = load_runs(args.since, args.project, delegate)
     if not runs:
-        print("No runs found.")
+        print(f"No runs found (scope: {scope}).")
         return
 
     if args.fails:
+        print(f"\n[scope: {scope}]")
         show_fails(runs, limit=50, include_warns=True, benchmark=True)
         return
 
     if args.adapt:
+        print(f"\n[scope: {scope}]")
         show_adaptations(runs)
         show_fails(runs, limit=20, include_warns=False, benchmark=False)
         return
 
-    show_overview(runs)
+    show_overview(runs, scope)
     show_by_model(runs)
     show_by_project(runs)
     show_fails(runs, limit=10, include_warns=False, benchmark=False)

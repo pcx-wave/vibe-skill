@@ -54,7 +54,13 @@ extracted from the arguments, display output verbatim, and stop.
 | "project foo" | `--project foo` |
 | "only failures", "fails", "bugs" | `--fails` |
 | "adapt", "adaptations", "by adaptation" | `--adapt` |
-| (nothing) | (no flags — full report) |
+| "all delegates", "everything", "compare delegates" | `--all` |
+| "delegate foo", "only opencode" | `--delegate foo` |
+| (nothing) | (no flags — vibe runs only) |
+
+The report defaults to **vibe runs only**. The log is shared across delegate
+tools (vibe, opencode, gemini); use `--all` for the cross-delegate comparison
+or `--delegate NAME` to scope to a different one.
 
 ---
 
@@ -313,11 +319,13 @@ Every run appends one JSON entry to `~/.local/share/delegate-runs.jsonl`.
 Log fields and jq queries → see `SKILL-reference.md`.
 
 ```bash
-~/tools/delegate-report                  # full report
+~/tools/delegate-report                  # vibe runs only (default)
 ~/tools/delegate-report --since 7        # last 7 days
 ~/tools/delegate-report --project myapp  # filter by project
 ~/tools/delegate-report --fails          # failures only
 ~/tools/delegate-report --adapt          # failure rates by prompt adaptation
+~/tools/delegate-report --all            # all delegates (shared log)
+~/tools/delegate-report --delegate opencode  # a specific delegate
 ```
 
 Or via Claude Code: `/vibe-report [args]`. Log fields and jq queries → `SKILL-reference.md`.
