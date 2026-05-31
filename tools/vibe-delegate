@@ -26,7 +26,20 @@
 #           warn_count, search_replace_fails, cost_claude_eq, wrote_nothing,
 #           failure_reason, adaptations.
 
-WORKDIR="${1:?Usage: vibe-delegate <workdir> <prompt> [max-turns] [agent] [timeout-secs]}"
+# Pull out --require "<string>" flags (repeatable) from anywhere in the args,
+# then treat the rest as positional. Each required string must already exist in
+# the workdir or the run is aborted before launch (see pre-flight gate below).
+REQUIRES=()
+POSITIONAL=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --require) REQUIRES+=("$2"); shift 2 ;;
+    *) POSITIONAL+=("$1"); shift ;;
+  esac
+done
+set -- "${POSITIONAL[@]}"
+
+WORKDIR="${1:?Usage: vibe-delegate <workdir> <prompt> [max-turns] [agent] [timeout-secs] [--require STR ...]}"
 PROMPT="${2:?Prompt required}"
 MAX_TURNS="${3:-10}"
 AGENT="${4:-}"
@@ -35,6 +48,38 @@ TIMEOUT_SECS="${5:-180}"
 if [ ! -d "$WORKDIR" ]; then
   echo "ERROR: workdir '$WORKDIR' does not exist" >&2
   exit 1
+fi
+
+# Pre-flight gate: a search_replace can't match an anchor that isn't in the file,
+# so abort before wasting a vibe run if any --require string is absent. Turns the
+# "grep the target first" rule into an enforced check; logs a cheap precheck_abort.
+if [ "${#REQUIRES[@]}" -gt 0 ]; then
+  MISSING=()
+  for s in "${REQUIRES[@]}"; do
+    grep -rqF -- "$s" "$WORKDIR" 2>/dev/null || MISSING+=("$s")
+  done
+  if [ "${#MISSING[@]}" -gt 0 ]; then
+    echo "=== PRECHECK ABORT — required string(s) not found in $WORKDIR ==="
+    for s in "${MISSING[@]}"; do echo "  missing: $s"; done
+    echo "Nothing was launched. Fix the anchor (grep locally) or the workdir, then retry."
+    python3 - "$WORKDIR" <<'PYABORT'
+import json, os, sys
+from pathlib import Path
+from datetime import datetime, timezone
+wd = sys.argv[1]
+LOG = Path.home() / '.local' / 'share' / 'delegate-runs.jsonl'
+LOG.parent.mkdir(parents=True, exist_ok=True)
+entry = {
+    'ts': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+    'delegate': 'vibe', 'workdir': wd, 'project': os.path.basename(wd.rstrip('/')),
+    'exit_code': 2, 'tool_calls': 0, 'files_changed': 0, 'tokens_total': 0,
+    'duration_secs': 0, 'failure_reason': 'precheck_abort',
+}
+with open(LOG, 'a') as f:
+    f.write(json.dumps(entry) + '\n')
+PYABORT
+    exit 2
+  fi
 fi
 
 # Model override: /vibe-model-pick writes alias to this flag file.

@@ -194,6 +194,7 @@ A grep is reliable. A file re-read may miss content outside the read window.
 | `max-turns`    | `10`     | Mistral turn limit — hard cap at 12, never more |
 | `agent`        | *(none)* | See agent table below                           |
 | `timeout-secs` | `180`    | Wall-clock kill timer                           |
+| `--require STR` | *(none)* | Repeatable. Abort before launch if STR is absent in the workdir — pass the `search_replace` anchor here |
 
 The script allocates a pseudo-TTY via Python's `pty.spawn` (required — vibe hangs without one).
 
@@ -304,7 +305,7 @@ Ready to commit?
 - **Check diff between sub-tasks** — never launch the next one blind.
 - **Don't code instead of Vibe** unless Vibe completed ≥50% and crashed.
 - **Max 12 turns per call** — beyond that, Mistral context saturates.
-- **Grep target before delegating** — `grep -n "exact_target" file.py` before any `search_replace` prompt. No match = empty run. Always use grep for VERIFY, not file re-read.
+- **Grep target before delegating** — `grep -n "exact_target" file.py` before any `search_replace` prompt. No match = empty run. Pass that anchor as `--require "exact_target"` so the delegate aborts before launching if it's gone. Always use grep for VERIFY, not file re-read.
 - **UTF-8 / emoji in the prompt** → the script handles it via temp file, but test with a short prompt first.
 - **After any run that touches imports: grep the import line** — sequential runs can revert each other's import changes. Always run `grep "^from X import" file.py` before the next sub-task.
 - **search_replace [OK] ≠ correct change** — Vibe may report OK even if the match was on unintended content. Always grep the specific changed line, not just check syntax.

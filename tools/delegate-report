@@ -235,6 +235,10 @@ FAIL_INFO = {
                       'Check [WARN] lines in run output; may still be correct'),
     'warn':          ('Non-fatal tool errors during run',
                       'Check [WARN] lines in run output; may still be correct'),
+    'precheck_abort':('Required --require anchor missing — run never launched',
+                      'A wasted run was avoided; grep the anchor locally, fix prompt or workdir'),
+    'precheck':      ('Required --require anchor missing — run never launched',
+                      'A wasted run was avoided; grep the anchor locally, fix prompt or workdir'),
 }
 
 # Canonical failure type names (new format) → display codes (backwards compat)
@@ -247,6 +251,7 @@ _REASON_DISPLAY = {
     'sr_fail':      'sr_fail',
     'warn_only':    'warn',
     'timeout':      'timeout',
+    'precheck_abort':'precheck',
     'ok':           None,
 }
 
