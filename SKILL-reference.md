@@ -66,6 +66,26 @@ Every run appends one JSON entry to `~/.local/share/delegate-runs.jsonl`.
 
 ---
 
+## Cost estimate methodology
+
+Per run, `vibe-delegate` derives tokens and cost from Vibe's own session file
+(`~/.vibe/logs/session/<id>/meta.json`) — these are **estimates for comparison, not billed
+amounts**. How each piece is computed:
+
+| Piece | Source / method | Caveat |
+|---|---|---|
+| Total tokens | `session_total_llm_tokens` from meta.json | Real — Vibe's measured count |
+| Input vs output split | **Estimated**: the *last turn's* `prompt : completion` ratio applied to the run total | Vibe also exposes the exact cumulative `session_prompt_tokens` / `session_completion_tokens`; the last-turn ratio is an approximation that skews on multi-turn runs |
+| Cache tokens | **Not accounted for** — meta.json exposes no cache stats | All input is priced at the full input rate; if the provider caches prompt prefixes (cheaper), the estimate is an upper bound |
+| Price | `(in × input_price + out × output_price) / 1e6`, per-model prices from `~/.vibe/config.toml` | Fallback is 1.5 / 7.5 (Mistral Medium). Runs logged *before* a model's pricing was added used that fallback — e.g. early DeepSeek runs show Mistral-rate cost, inflated ~7× |
+| Claude equivalent | Same in/out tokens priced at $3 / $15 per M | Fixed Sonnet 4.6 reference rate |
+
+Vibe's own `session_cost` is present in meta.json but **not used** — the script recomputes
+from the config price table so every model is compared on one consistent basis.
+
+**Known improvement (not yet done):** switch the in/out split from the last-turn ratio to the
+exact `session_prompt_tokens` / `session_completion_tokens`. Affects future runs only.
+
 ## jq Queries
 
 ```bash

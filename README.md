@@ -60,23 +60,26 @@ Snapshot over **2,103 vibe delegations**, 2026-05-12 → 2026-05-30 (19 days). P
 | Tokens delegated | 139.8M |
 | Exit-success rate | 81% |
 | Clean rate (no soft failure) | 67% |
-| Paid (provider API rates) | $174.28 |
-| Claude Sonnet 4.6 equivalent | $456.94 |
-| **Saved vs Claude** | **$282.66 (62% cheaper)** |
 | Avg run duration | 33s |
+| **Actually paid** | **~$5 DeepSeek credit + Le Chat Pro sub (~$18/mo)** |
+| Same workload on Claude Sonnet 4.6 | $456.94 |
+| **Effective saving** | **≈ 20× cheaper than Claude** |
+| Pay-as-you-go API equivalent | $174.28 *(reference only — not what was paid)* |
 
 > The 81% vs 67% gap is *soft* failures — runs that exit 0 but write nothing or miss a `search_replace`. Exit code alone overstates real success; see the error table below.
 >
-> Cost caveat: 104M of the 139.8M tokens ran on `mistral-medium-3.5`, billed here at API rates ($137). Under a Le Chat Pro subscription (~$18/mo, ~1B tokens included) that volume is effectively flat-rate — real out-of-pocket would be far lower and savings correspondingly higher.
+> **What this actually cost:** 104M of the 139.8M tokens ran on `mistral-medium-3.5` under a flat **Le Chat Pro subscription** (~$18/mo, ~1B-token quota — $0 marginal), and the DeepSeek runs were covered by a **$5 credit**. The `$174.28` figure and the per-model "API-rate cost" column below are what the same volume *would* cost at pay-as-you-go rates — a model-comparison reference, **not money spent**. Against Claude's $456.94, real out-of-pocket (~$23 for the period) is roughly **20× cheaper**.
 
 **By model**
 
-| Model | Runs | Exit-ok | Avg dur | Tokens | Paid | Saved vs Claude |
+| Model | Runs | Exit-ok | Avg dur | Tokens | API-rate cost¹ | vs Claude |
 |---|---|---|---|---|---|---|
 | mistral-medium-3.5 | 1,718 | 79% | 31s | 104.2M | $137.09 | $206.24 |
 | deepseek-flash | 269 | 93% | 41s | 32.1M | $35.43 | $67.12 |
 | devstral-small | 68 | 63% | 19s | 2.6M | $0.26 | $7.81 |
 | mistral (Le Chat) | 48 | 95% | 43s | 0.9M | $1.49 | $1.49 |
+
+¹ Pay-as-you-go reference, not actual spend — mistral-medium ran on the Le Chat Pro sub and DeepSeek on a $5 credit (see above).
 
 `deepseek-flash` is the value pick (93% exit-ok at ~$0.13/run). `devstral-small` underperforms (63%) — it is an agent-mode model and fits the inline-edit delegation pattern poorly; prefer it only for read/explore.
 
@@ -111,7 +114,7 @@ Effect is read straight from `/vibe-report` — `precheck_abort` displacing `exi
 | Runs | 2,103 | 254 |
 | Tokens | 139.8M | 8.5M |
 | Exit-ok | 81% | 81% |
-| Paid | $174.28 | $0 (free tiers) |
+| API-rate cost (reference) | $174.28 | $0 (free tiers) |
 | Models | mistral-medium, deepseek-flash (paid, capable) | free deepseek / mimo / nemotron tiers |
 
 Same headline exit-rate, very different profile: `opencode` runs free model tiers at zero cost but with high `silent_exit` (model returns nothing) and timeout rates (e.g. nemotron timed out on 31 of 50 runs). It's economical for cheap bulk exploration; vibe's paid models are the choice when the edit has to actually land. Both write to the same log, so `/vibe-report --all` compares them directly.
@@ -323,6 +326,8 @@ Python's `pty.spawn` allocates a pseudo-TTY — portable across Linux and macOS,
 | Run log writer | Builds a structured JSON entry with multiple computed fields; shell heredoc+`jq` would be fragile |
 
 `delegate-report` is fully Python: it aggregates, sorts, and formats tabular data across hundreds of log entries — the kind of work where shell pipelines become unmaintainable.
+
+> Cost figures are **estimates**, not billed amounts. Total tokens are Vibe's real count, but the input/output split is *approximated* from the last turn's ratio, cache reads are not accounted for, and prices come from `config.toml`. See [`SKILL-reference.md` → Cost estimate methodology](SKILL-reference.md#cost-estimate-methodology) for exactly how it is derived and its limits.
 
 ---
 
