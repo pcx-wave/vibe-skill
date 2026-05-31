@@ -33,18 +33,7 @@ Summary:
 
 > **Le Chat Pro users:** Mistral Vibe is included in the [Le Chat Pro](https://mistral.ai/pricing) subscription (~$18/mo). Mistral does not publicly document the exact usage limits, but community reports suggest ~1–1.5B tokens/month are included. Within that allowance every delegation costs $0 in API fees — cheaper than any paid model.
 
-### Real-world stats (254 runs, May 2026)
-
-**Cost savings observed over 10 days across 57M tokens delegated:**
-
-| | Amount |
-|---|---|
-| Actually paid (sub prorated + deepseek) | **$10.35** |
-| Same workload pay-as-you-go | $46.61 |
-| Same workload on Claude Sonnet | $179.91 |
-| Saved vs Claude | **$169.56 (17.4× cheaper)** |
-
-**Should you subscribe to Mistral Pro, or just use DeepSeek?**
+### Subscribe to Mistral Pro, or just use DeepSeek?
 
 DeepSeek alone ($0.14/M blended) is cheaper than the Mistral Pro subscription (~$18/mo) until you hit **~131M tokens/month**:
 
@@ -52,27 +41,12 @@ DeepSeek alone ($0.14/M blended) is cheaper than the Mistral Pro subscription (~
 tokens/month  │ DeepSeek only │ Mistral Pro sub │ Verdict
 ──────────────┼───────────────┼─────────────────┼──────────────────────────
   50M         │  $7.03        │  $18.36         │ DeepSeek cheaper
-  84M (now)   │  $11.80       │  $18.36         │ DeepSeek cheaper
  131M         │  $18.41       │  $18.36         │ ← break-even
- 200M         │  $28.10       │  $18.36         │ Mistral Pro worth it
+ 221M (now)   │  $31.01       │  $18.36         │ Mistral Pro worth it
  500M         │  $70.25       │  $18.36         │ Mistral Pro worth it
 ```
 
 Above 131M tokens/month, subscribe to Mistral Pro and use it until the quota (~1B–1.5B tokens) is exhausted — then fall back to DeepSeek. Never let Mistral roll into pay-as-you-go ($1.52/M blended — 10× more expensive than DeepSeek).
-
-**Reliability (deepseek-flash, 178 runs):**
-
-| Failure type | Rate | Root cause |
-|---|---|---|
-| `sr_fail` (search/replace miss) | 19% of runs | Model reconstructs SEARCH block from memory instead of exact file bytes; accented chars or backticks prevent byte-exact match |
-| `empty` (wrote nothing) | 12% of runs | Multi-edit prompt causes context drift — first target not found, run silently abandons; or task already done |
-| `warn` (non-fatal) | 21% of runs | Usually harmless; check `[WARN]` lines in output |
-| Hard failure (exit 127) | 1.7% of runs | HTML tags (`<div>`, `</div>`) in prompt body interpreted as bash redirections |
-
-Mitigations:
-- Grep for the exact target string before writing any prompt that uses `search_replace`
-- One change per run — multi-edit prompts cause context drift and empty runs
-- For HTML/JS content: write to `/tmp` first, tell Vibe to read that file
 
 ### Delegation synthesis — as of 2026-05-30
 
