@@ -18,7 +18,8 @@
 #   Fields: ts, delegate, project, prompt_words, agent, max_turns, timeout_secs,
 #           exit_code, timed_out, tool_calls, files_changed, syntax_errors,
 #           duration_secs, tokens_in, tokens_out, tokens_total, cost_usd, model,
-#           warn_count, search_replace_fails, cost_claude_eq, wrote_nothing.
+#           warn_count, search_replace_fails, cost_claude_eq, wrote_nothing,
+#           failure_reason, adaptations.
 
 WORKDIR="${1:?Usage: vibe-delegate <workdir> <prompt> [max-turns] [agent] [timeout-secs]}"
 PROMPT="${2:?Prompt required}"

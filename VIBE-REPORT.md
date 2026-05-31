@@ -17,4 +17,5 @@ Run `~/tools/delegate-report` with any flags extracted from the arguments and di
 | "last 30 days", "30d" | `--since 30` |
 | "project foo" | `--project foo` |
 | "only failures", "fails", "bugs" | `--fails` |
+| "adapt", "adaptations", "by adaptation" | `--adapt` |
 | (nothing) | (no flags — full report) |
