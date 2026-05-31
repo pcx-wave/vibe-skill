@@ -61,14 +61,16 @@ Snapshot over **2,103 vibe delegations**, 2026-05-12 → 2026-05-30 (19 days). P
 | Exit-success rate | 81% |
 | Clean rate (no soft failure) | 67% |
 | Avg run duration | 33s |
-| **Actually paid** | **~$5 DeepSeek credit + Le Chat Pro sub (~$18/mo)** |
+| **Actually paid** | **$5.07 DeepSeek (billed) + Le Chat Pro sub (~$18/mo)** |
 | Same workload on Claude Sonnet 4.6 | $456.94 |
 | **Effective saving** | **≈ 20× cheaper than Claude** |
 | Pay-as-you-go API equivalent | $174.28 *(reference only — not what was paid)* |
 
 > The 81% vs 67% gap is *soft* failures — runs that exit 0 but write nothing or miss a `search_replace`. Exit code alone overstates real success; see the error table below.
 >
-> **What this actually cost:** 104M of the 139.8M tokens ran on `mistral-medium-3.5` under a flat **Le Chat Pro subscription** (~$18/mo, ~1B-token quota — $0 marginal), and the DeepSeek runs were covered by a **$5 credit**. The `$174.28` figure and the per-model "API-rate cost" column below are what the same volume *would* cost at pay-as-you-go rates — a model-comparison reference, **not money spent**. Against Claude's $456.94, real out-of-pocket (~$23 for the period) is roughly **20× cheaper**.
+> **What this actually cost:** 104M of the 139.8M tokens ran on `mistral-medium-3.5` under a flat **Le Chat Pro subscription** (~$18/mo, ~1B-token quota — $0 marginal); the DeepSeek runs cost **$5.07**, verified from provider billing. The `$174.28` figure and the per-model "API-rate cost" column below are what the same volume *would* cost at pay-as-you-go rates — a model-comparison reference, **not money spent**. Against Claude's $456.94, real out-of-pocket (~$23 for the period) is roughly **20× cheaper**.
+>
+> **Why the log over-counts DeepSeek:** of DeepSeek's 221M input tokens, **90% were cache hits** at $0.0028/M (50× cheaper than the $0.14/M miss rate), so real cost was $5.07 — not the ~$35 the run log estimates. The log prices every input token at the full miss rate (no cache awareness), and runs logged before DeepSeek pricing was added used the Mistral fallback. Cache alone is a ~6× overstatement here. See [cost methodology](SKILL-reference.md#cost-estimate-methodology).
 
 **By model**
 
@@ -79,7 +81,7 @@ Snapshot over **2,103 vibe delegations**, 2026-05-12 → 2026-05-30 (19 days). P
 | devstral-small | 68 | 63% | 19s | 2.6M | $0.26 | $7.81 |
 | mistral (Le Chat) | 48 | 95% | 43s | 0.9M | $1.49 | $1.49 |
 
-¹ Pay-as-you-go reference, not actual spend — mistral-medium ran on the Le Chat Pro sub and DeepSeek on a $5 credit (see above).
+¹ Pay-as-you-go reference, not actual spend — mistral-medium ran on the Le Chat Pro sub; DeepSeek's real billed cost was **$5.07** (90% cache hits), not the cache-blind $35.43 shown here.
 
 `deepseek-flash` is the value pick (93% exit-ok at ~$0.13/run). `devstral-small` underperforms (63%) — it is an agent-mode model and fits the inline-edit delegation pattern poorly; prefer it only for read/explore.
 

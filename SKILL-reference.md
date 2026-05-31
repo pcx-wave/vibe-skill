@@ -76,7 +76,7 @@ amounts**. How each piece is computed:
 |---|---|---|
 | Total tokens | `session_total_llm_tokens` from meta.json | Real — Vibe's measured count |
 | Input vs output split | **Estimated**: the *last turn's* `prompt : completion` ratio applied to the run total | Vibe also exposes the exact cumulative `session_prompt_tokens` / `session_completion_tokens`; the last-turn ratio is an approximation that skews on multi-turn runs |
-| Cache tokens | **Not accounted for** — meta.json exposes no cache stats | All input is priced at the full input rate; if the provider caches prompt prefixes (cheaper), the estimate is an upper bound |
+| Cache tokens | **Not accounted for** — meta.json exposes no cache stats | All input is priced at the full input rate; if the provider caches prompt prefixes (cheaper), the estimate is an upper bound. **Measured example:** a DeepSeek period billed $5.07 — 90% of its 221M input tokens were cache hits at $0.0028/M (50× cheaper than the $0.14/M miss rate). The cache-blind estimate was ~$35 (≈6× too high) |
 | Price | `(in × input_price + out × output_price) / 1e6`, per-model prices from `~/.vibe/config.toml` | Fallback is 1.5 / 7.5 (Mistral Medium). Runs logged *before* a model's pricing was added used that fallback — e.g. early DeepSeek runs show Mistral-rate cost, inflated ~7× |
 | Claude equivalent | Same in/out tokens priced at $3 / $15 per M | Fixed Sonnet 4.6 reference rate |
 
