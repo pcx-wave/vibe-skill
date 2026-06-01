@@ -6,7 +6,7 @@
 
 **Claude orchestrates. Vibe does the heavy lifting. You review the diff, save tokens, costs and avoid hitting limits!**
 
-Claude sees only ~500–1500 tokens per run regardless of how many file reads Vibe performs internally — massive savings on exploratory and implementation tasks.
+Claude sees only ≈500–1500 tokens per run regardless of how many file reads Vibe performs internally — massive savings on exploratory and implementation tasks.
 
 Note that Vibe works natively with Mistral models which are capable and significantly cheaper than Claude, but Vibe can also be configured to use any other provider/model instead. Eg you can use a deepseek model with vibe tooling. 
 
@@ -25,44 +25,13 @@ Summary:
 
 | Scenario | Claude Sonnet 4.6 | Mistral Medium 3.5 | DeepSeek V4 Flash |
 |----------|-------------------|--------------------|-------------------|
-| Simple 1-file tweak (800 tokens) | ~$0.004 | ~$0.002 | ~$0.0001 |
-| 6-read implementation task (4,800 tokens) | ~$0.023 | ~$0.012 | ~$0.0008 |
-| Complex multi-file refactor (12,000 tokens) | ~$0.058 | ~$0.029 | ~$0.002 |
+| Simple 1-file tweak (800 tokens) | ≈$0.004 | ≈$0.002 | ≈$0.0001 |
+| 6-read implementation task (4,800 tokens) | ≈$0.023 | ≈$0.012 | ≈$0.0008 |
+| Complex multi-file refactor (12,000 tokens) | ≈$0.058 | ≈$0.029 | ≈$0.002 |
 
-> Costs based on official pricing (May 2026): Claude $3/$15 per M tokens, Mistral Medium 3.5 $1.50/$7.50, DeepSeek V4 Flash $0.14/$0.28. Assumes ~85% input / 15% output, typical for coding tasks. Claude orchestration overhead: ~500 tokens per run (negligible).
+> Costs based on official pricing (May 2026): Claude $3/$15 per M tokens, Mistral Medium 3.5 $1.50/$7.50, DeepSeek V4 Flash $0.14/$0.28. Assumes ≈85% input / 15% output, typical for coding tasks. Claude orchestration overhead: ≈500 tokens per run (negligible).
 
-> **Le Chat Pro users:** Mistral Vibe is included in the [Le Chat Pro](https://mistral.ai/pricing) subscription (~$18/mo). Mistral does not publicly document the exact usage limits, but community reports suggest ~1–1.5B tokens/month are included. Within that allowance every delegation costs $0 in API fees — cheaper than any paid model.
-
-### Subscribe to Mistral Pro, or just use DeepSeek?
-
-DeepSeek's headline input rate is $0.14/M — but that is the cache-**miss** rate. With
-prompt caching on iterative coding (the same file context resent across turns), real
-billed cost is far lower. Measured on the 269 vibe runs: **$0.67 for 32.1M tokens ≈ $0.021/M
-blended**, because ~90% of input was served from cache at $0.0028/M. At that rate
-DeepSeek-only stays cheaper than the Mistral Pro subscription (~$18/mo) until **~880M
-tokens/month**:
-
-```
-tokens/month  │ DeepSeek only* │ Mistral Pro sub │ Verdict
-──────────────┼────────────────┼─────────────────┼──────────────────────────
-  50M         │  $1.04         │  $18.36         │ DeepSeek cheaper
- 221M (now)   │  $4.61         │  $18.36         │ DeepSeek cheaper
- 500M         │  $10.44        │  $18.36         │ DeepSeek cheaper
- 880M         │  $18.37        │  $18.36         │ ← break-even
-   1B         │  $20.87        │  $18.36         │ Mistral Pro worth it
-```
-
-\* Assumes the ~90% cache-hit rate observed on iterative coding. One-off, diverse tasks
-cache less and trend toward the $0.14/M miss rate — at which break-even drops back to
-~130M/month. So the honest range is **break-even somewhere between ~130M (cache-light)
-and ~880M (cache-heavy) tokens/month.**
-
-If you routed your whole ~221M/month delegation volume to DeepSeek, the cache-aware rate
-projects ~$5/mo — well under the Mistral Pro sub, and the *opposite* of what a cache-blind
-$0.14/M estimate ($31/mo) would suggest.
-Subscribe to Mistral Pro only once you are reliably above your break-even band, and use
-it until the quota (~1B–1.5B tokens) is exhausted. Never let Mistral roll into
-pay-as-you-go ($1.52/M blended).
+> **Le Chat Pro users:** Mistral Vibe is included in the [Le Chat Pro](https://mistral.ai/pricing) subscription (≈$18/mo). Mistral does not publicly document the exact usage limits, but community reports suggest ≈1–1.5B tokens/month are included. Within that allowance every delegation costs $0 in API fees — cheaper than any paid model.
 
 ### Delegation synthesis — as of 2026-05-30
 
@@ -77,68 +46,29 @@ Snapshot over **2,103 vibe delegations**, 2026-05-12 → 2026-05-30 (19 days). P
 | Exit-success rate | 81% |
 | Clean rate (no soft failure) | 67% |
 | Avg run duration | 33s |
-| **Actually paid** | **~$0.67 DeepSeek (32M tokens) + Le Chat Pro sub (~$18/mo)** |
+| **Actually paid** | **≈$0.67 DeepSeek (32M tokens) + Le Chat Pro sub (≈$18/mo)** |
 | Same workload on Claude Sonnet 4.6 | $456.94 |
 | **Effective saving** | **≈ 24× cheaper than Claude** |
-| Pay-as-you-go API equivalent | $174.28 *(reference only — not what was paid)* |
-
-> The 81% vs 67% gap is *soft* failures — runs that exit 0 but write nothing or miss a `search_replace`. Exit code alone overstates real success; see the error table below.
->
-> **What this actually cost:** 104M of the 139.8M tokens ran on `mistral-medium-3.5` under a flat **Le Chat Pro subscription** (~$18/mo, ~1B-token quota — $0 marginal); the 269 DeepSeek runs (32.1M tokens) cost **~$0.67**, from cache-aware provider billing. The `$174.28` figure and the per-model "API-rate cost" column below are what the same volume *would* cost at pay-as-you-go rates — a model-comparison reference, **not money spent**. Against Claude's $456.94, real out-of-pocket (~$19 for the period, almost entirely the flat sub) is roughly **24× cheaper**.
->
-> **Why the log over-counts DeepSeek:** the run log estimates ~$4.6 for those 32.1M tokens because it prices every input token at the full $0.14/M miss rate (no cache awareness). Real billing shows **~90% of input was cache hits** at $0.0028/M (50× cheaper), so the true cost was **~$0.67** — a ~7× overstatement by the log. See the token breakdown below and the [cost methodology](SKILL-reference.md#cost-estimate-methodology). *(A separate, much larger DeepSeek bill on the same account that month was an unrelated batch project, not delegation.)*
-
-**The token structure of delegated coding** — *and why delegation actually pays*
-
-DeepSeek's billing splits usage into cache-hit / cache-miss / output — detail most premium providers now expose too (OpenAI, Anthropic, Gemini all distinguish cached input). The 269 DeepSeek delegations broke down as:
-
-| Component | Tokens | % of tokens | Cost | **% of cost** |
-|---|---|---|---|---|
-| input — cache hit | ~28.5M | 89% | $0.08 | **12%** |
-| input — cache miss | ~3.2M | 10% | $0.44 | **67%** |
-| output (the code itself) | 0.5M | 1.6% | $0.14 | **21%** |
-| **Total** | **32.1M** | 100% | **~$0.67** | 100% |
-
-The token-share and cost-share columns are almost **inverted** — that inversion is the whole story:
-
-- **Cache hits: 89% of tokens, only 12% of cost.** The same files and system prompt resent every turn, served at 1/50th the price — effectively free volume.
-- **Cache misses: ~10% of tokens, but 67% of cost.** The *fresh* context you can't cache is the dominant cost driver, despite being a sliver of the tokens.
-- **Output: 1.6% of tokens, but 21% of cost.** A small count of the **most expensive token type** ($0.28/M — 100× a cache hit, 2× a miss). It's the deliverable, and it's a real fifth of the bill.
-- **~60:1 input:output** overall — coding delegation is dominated by *reading and re-sending context*, but the small output you do generate is priced at a premium.
-
-This **cacheable shape is workload-driven, not vibe-specific** — a graph-backfill batch (a different tool, a non-coding task) on the same account showed the same ~90%-cache, input-heavy profile. But the ~90% *realized hit rate* is **provider-gated, not model-agnostic**: it's automatic on DeepSeek/OpenAI, whereas opt-in-cache providers like Claude get **0% unless the harness sets `cache_control` breakpoints**. So a Claude-as-delegate run of the same workload would sit near the *no-cache* cost, not the cached one — the 90% is a property of (repeated-context workload × an auto-caching provider × a prefix-stable harness), all three, not of any one model.
-
-**So the real value of delegating is offloading the context-reading mountain.** Two-thirds of the cost is *fresh context churn* (cache misses) and most of the rest is repeated context (hits) — together ~79% of cost is moving the codebase in and out, only ~21% is producing the answer. You shift all of that onto a sub-dollar delegate, and your premium orchestrator only pays to *read back the 0.5M-token result* — never to re-read the codebase 60× per task, and never filling its own context window. That's the lever, and it's why cache-aware cheap models (and a harness that lets them cache) beat raw model price every time on this workload.
-
-**How to optimize, in priority order** — follow the cost%, not the token%:
-
-1. **Cut cache misses (67% of cost).** Caching is **prefix-based** — a token is a hit only if everything before it is byte-identical to a recently-cached request. So:
-   - **Static content first, variable task last:** system prompt → tool defs → file context → the task. Anything that changes early invalidates the whole cache after it.
-   - **No cache-busters in the prefix** — no timestamps, UUIDs, or reordered instructions per call; keep the preamble byte-stable.
-   - **Batch tasks against the same repo back-to-back, within the cache TTL** (DeepSeek ~hours, OpenAI ~5–60 min, Claude 5 min–1 hr). Scattered calls go cold and pay the full miss each time.
-   - **Keep fresh per-task context small** — the miss is *only the new bytes*. Don't switch models mid-batch (separate caches).
-2. **Use a cache-aware cheap model + a harness that caches** (auto on DeepSeek/OpenAI; opt-in `cache_control` on Claude). This is the big win — without caching the same workload costs ~7× more. (vibe already runs ~90% hit, so #1 is fine-tuning; #2 is the order-of-magnitude lever.)
-3. **Don't chase output (21% of cost) — it's irreducible, not negligible.** A real fifth of the bill, but it *is* the deliverable; trimming it means producing less or worse work. Optimize prompts for correctness, not for shaving the one token type you're paying to receive.
 
 **By model**
 
-| Model | Runs | Exit-ok | Avg dur | Tokens | API-rate cost¹ | vs Claude |
+| Model | Runs | Exit-ok | Avg dur | Tokens | API-rate cost* | vs Claude |
 |---|---|---|---|---|---|---|
 | mistral-medium-3.5 | 1,718 | 79% | 31s | 104.2M | $137.09 | $206.24 |
 | deepseek-flash | 269 | 93% | 41s | 32.1M | $35.43 | $67.12 |
 | devstral-small | 68 | 63% | 19s | 2.6M | $0.26 | $7.81 |
 | mistral (Le Chat) | 48 | 95% | 43s | 0.9M | $1.49 | $1.49 |
 
-¹ Pay-as-you-go reference, not actual spend — mistral-medium ran on the Le Chat Pro sub; DeepSeek's real billed cost was **~$0.67** (90% cache hits), not the cache-blind $35.43 shown here.
+\* Pay-as-you-go reference — mistral-medium ran on Le Chat Pro sub ($0 marginal); DeepSeek real cost was $0.67 (cache-aware), not $35.43.
 
-`deepseek-flash` is the value pick (93% exit-ok at ~$0.0025/run real). `devstral-small` underperforms (63%) — it is an agent-mode model and fits the inline-edit delegation pattern poorly; prefer it only for read/explore.
+`deepseek-flash` is the value pick (93% exit-ok at ≈$0.0025/run). `devstral-small` underperforms for edits — use it for read/explore only.
 
 **Error rate** (real projects, 1,964 runs — synthetic test scaffolds excluded)
 
 | Class | Rate | What it is |
 |---|---|---|
 | clean ok | 67.1% | completed and wrote files |
-| `exit_error` | 18.7% | engaged (~7 tool calls) then exited non-zero, **95% wrote nothing** |
+| `exit_error` | 18.7% | engaged (≈7 tool calls) then exited non-zero, **95% wrote nothing** |
 | `wrote_nothing` | 7.1% | tool calls but 0 files, exit 0 |
 | `warn_only` | 2.5% | non-fatal warnings, usually fine |
 | `sr_fail` | 2.4% | `search_replace` byte-match miss (accents, backticks) |
@@ -146,16 +76,7 @@ This **cacheable shape is workload-driven, not vibe-specific** — a graph-backf
 | `syntax_error` | 0.4% | wrote invalid code (caught by post-run gate) |
 | `timeout` | 0.3% | task too large / context saturated |
 
-**`exit_error` + `wrote_nothing` (≈26%) share one root cause:** vibe engages but lands no edit — multi-edit context drift, or the first `search_replace` target isn't found byte-for-byte and the run abandons. This is the single biggest reliability lever.
-
-**Fixes shipped after this snapshot (2026-05-31)** to attack the above — impact to be measured in the next snapshot:
-
-- **`--require` target-presence gate** → the `exit_error` + `wrote_nothing` cluster (~26%): aborts before launch when the `search_replace` anchor isn't in the file, so a doomed run never runs (logged as cheap `precheck_abort` instead of a wasted `exit_error`).
-- **Model routing** → model-mismatch `exit_error`: agent-mode `devstral-small` is kept to read/explore; inline edits go to `deepseek-flash` / `mistral-medium-3.5`.
-- **`failure_reason` taxonomy** → visibility: surfaces the silent `silent_exit` / `near_empty` failures the old flag missed.
-- **`contract` / `output_format` adaptations** → correctness and the "vibe wrote nothing, I'll redo it" loop; left off-by-default until `/vibe-report --adapt` has enough runs to prove they help.
-
-Effect is read straight from `/vibe-report` — `precheck_abort` displacing `exit_error`, and the `--adapt` cohort once it fills. See [`docs/error-reduction.md`](docs/error-reduction.md) for the full plan.
+The 26% `exit_error` + `wrote_nothing` share one root cause: `search_replace` anchor not found byte-for-byte and the run abandons. The `--require` gate aborts these before they waste tokens.
 
 **Versus the other delegate (`opencode`)**
 
@@ -167,13 +88,7 @@ Effect is read straight from `/vibe-report` — `precheck_abort` displacing `exi
 | API-rate cost (reference) | $174.28 | $0 (free tiers) |
 | Models | mistral-medium, deepseek-flash (paid, capable) | free deepseek / mimo / nemotron tiers |
 
-Same headline exit-rate, very different profile: `opencode` runs free model tiers at zero cost but with high `silent_exit` (model returns nothing) and timeout rates (e.g. nemotron timed out on 31 of 50 runs). It's economical for cheap bulk exploration; vibe's paid models are the choice when the edit has to actually land. Both write to the same log, so `/vibe-report --all` compares them directly.
-
----
-
-**Context window protection** — On long coding sessions, every file read, function body, and debug loop burns Claude's context. Delegating to Vibe keeps that budget free. Claude enters the task, hands off, and comes back only to review the result — no context bleed from Vibe's internal turns.
-
-**Built-in quality gate** — Claude doesn't just fire and forget. After each Vibe run, Claude reads the `git diff`, checks for syntax errors, and summarizes what changed before reporting back to you. You get a second pair of eyes on every delegation without lifting a finger.
+Same headline exit-rate, very different profile: `opencode` runs free tiers at zero cost but with high `silent_exit` and timeout rates. Use it for cheap exploration; vibe's paid models are the choice when the edit has to land. Both write to the same log — `/vibe-report --all` compares them.
 
 ---
 
@@ -364,20 +279,7 @@ Claude Code
                  └─ appends JSON entry to ~/.local/share/delegate-runs.jsonl
 ```
 
-Python's `pty.spawn` allocates a pseudo-TTY — portable across Linux and macOS, and it works even when the parent process has no controlling TTY (unlike the `script` command, which the delegate originally used); prompt via temp file avoids shell injection with UTF-8/emoji.
-
-**Shell vs Python split** — `vibe-delegate` started as pure shell. Python is now embedded in four places where shell falls short:
-
-| What | Why Python |
-|------|-----------|
-| JSON stream parser (live output) | Vibe emits a JSON stream; shell can't reliably parse it line by line without race conditions |
-| Token count + cost calculation | Reads `~/.vibe/config.toml` (TOML parsing), looks up per-model pricing, handles float arithmetic |
-| Syntax check (`py_compile`) | stdlib module — one line, no dependencies |
-| Run log writer | Builds a structured JSON entry with multiple computed fields; shell heredoc+`jq` would be fragile |
-
-`delegate-report` is fully Python: it aggregates, sorts, and formats tabular data across hundreds of log entries — the kind of work where shell pipelines become unmaintainable.
-
-> Cost figures are **estimates**, not billed amounts. Total tokens are Vibe's real count, but the input/output split is *approximated* from the last turn's ratio, cache reads are not accounted for, and prices come from `config.toml`. See [`SKILL-reference.md` → Cost estimate methodology](SKILL-reference.md#cost-estimate-methodology) for exactly how it is derived and its limits.
+> Cost figures are estimates. See [`SKILL-reference.md`](SKILL-reference.md#cost-estimate-methodology) for methodology.
 
 ---
 
