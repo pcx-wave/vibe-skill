@@ -39,7 +39,6 @@ When `vibe-auto.flag` exists, apply this gate **before** loading the full skill:
 | 1 file, ≤10 lines, exact location already known | Edit directly — do NOT invoke the skill |
 | Logic non-trivial, location unclear, multiple files, HTML/JS content, or >1 change | Invoke `/vibe` as normal |
 
-
 ---
 
 ## /vibe-report
@@ -67,7 +66,6 @@ or `--delegate NAME` to scope to a different one.
 ## /vibe-model-pick | /vibe-model-clear
 
 Override the Vibe model for all subsequent delegations without touching `~/.vibe/config.toml`.
-Works via `VIBE_ACTIVE_MODEL` env var, which Vibe respects over the config file.
 
 | Command | Action |
 |---------|--------|
@@ -100,7 +98,7 @@ Hard constraints — not config options. Full details in `SKILL-reference.md`.
 - **Code duplication** → Vibe may re-insert a block already written. Grep for duplicate definitions after every run.
 - **HTML in prompt** → tags like `<div>` are shell redirects (exit 127). Write HTML content to a temp file; reference the path in the prompt.
 - **Source code in bash heredoc** → quotes/backslashes mangle. Use `search_replace` directly; never a helper script that replaces code.
-- **Orchestration chain** → 6 failure points in order: CLI auth → pseudo-TTY → stream parser → TOML pricing → git diff → JSON log. When a run produces unexpected results (wrong token count, missing log entry, bad diff), work down this list. Full details in `SKILL-reference.md`.
+- **Orchestration chain** → 6 failure points in order: CLI auth → pseudo-TTY → stream parser → TOML pricing → git diff → JSON log. When a run produces unexpected results, work down this list. Full details in `SKILL-reference.md`.
 
 ---
 
@@ -113,8 +111,7 @@ Hard constraints — not config options. Full details in `SKILL-reference.md`.
 
 ## Step 2 — Decompose the task
 
-**Critical rule**: Vibe is optimized for **atomic, focused tasks**.
-Its system prompt literally says "Most tasks need <150 words."
+**Critical rule**: keep tasks **atomic and focused** — one objective, one prompt.
 
 | Size | Definition | Max turns | Approach |
 |------|-----------|-----------|----------|
@@ -136,9 +133,9 @@ Sub-task 4: Verify / test (5 turns)
 
 ## Step 3 — Write the Vibe prompt
 
-Vibe has no context from the parent conversation. The prompt must be **self-contained**.
+The prompt must be **self-contained**.
 
-**Structure of a good Vibe prompt:**
+**Structure:**
 ```
 Stack: Python/Flask, SQLAlchemy, SQLite
 Key files: app.py (routes + fetch), models.py (Entry)
@@ -158,9 +155,9 @@ VERIFY: grep for "def function_name" in file.py and confirm it exists.
 - Include a grep-based verification criterion (not a file re-read)
 - Language: English (better Mistral performance)
 
-**Prompt adaptations** — use these to improve first-pass success:
-- **Any task that defines or calls a specific function**: include the exact signature in the prompt — `def validate(data: dict) -> tuple[bool, list[str]]:`. Prevents the model implementing the wrong interface.
-- **Write/modify tasks**: append an output format block so Claude can verify without re-reading the file:
+**Prompt adaptations:**
+- **Any task that defines or calls a specific function**: include the exact signature — `def validate(data: dict) -> tuple[bool, list[str]]:`.
+- **Write/modify tasks**: append an output format block:
   ```
   OUTPUT FORMAT:
   Modified: <file>
@@ -177,7 +174,6 @@ VERIFY: grep for "def function_name" in file.py and confirm it exists.
 ```
 VERIFY: grep for "def extract_labels" in app.py and confirm it exists.
 ```
-A grep is reliable. A file re-read may miss content outside the read window.
 
 ---
 
@@ -195,8 +191,6 @@ A grep is reliable. A file re-read may miss content outside the read window.
 | `agent`        | *(none)* | See agent table below                           |
 | `timeout-secs` | `180`    | Wall-clock kill timer                           |
 | `--require STR` | *(none)* | Repeatable. Abort before launch if STR is absent in the workdir — pass the `search_replace` anchor here |
-
-The script allocates a pseudo-TTY via Python's `pty.spawn` (required — vibe hangs without one).
 
 **Available agents:**
 
@@ -256,7 +250,7 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 | `[WARN]` | Vibe encountered an error | Read the error, fix manually |
 | `[tool]  search_replace [FAIL]` | UTF-8 match failure | Edit manually with Python `str.replace()` |
 | `exit: 1` or non-zero | Vibe failed / did not complete verification | Read diff, correct prompt |
-| No `[tool]  file:` lines | Vibe read but wrote nothing | Prompt was too vague or task already done |
+| No `[tool]  file:` lines | `WROTE_NOTHING` — Vibe read but wrote nothing | Do not compensate — fix prompt and relaunch |
 | `=== SYNTAX ERRORS ===` | Post-run syntax check failed | **Fix before committing** |
 | Same file read 5+ times | Vibe is looping — run likely lost | Abort, check diff, try again |
 
@@ -264,10 +258,10 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 
 | Bug | Cause | Fix |
 |-----|-------|-----|
-| Variable declared twice | Same — Vibe doesn't check scope | Grep the variable before relaunching |
+| Variable declared twice | Vibe doesn't check scope | Grep the variable before relaunching |
 | Truncated prompt | Special chars in inline prompt | Script uses temp file — should be fixed |
-| Wrote a Python helper just to replace code | Misdiagnosed search_replace limit — plain Python code works fine | Use search_replace directly for ASCII code; write_file only if the new content is too long for the prompt |
-| Empty run — 0 files changed despite ≥3 tool calls | Multi-edit prompt: context drifts after long file read, first `search_replace` target not found byte-for-byte, run silently abandons | Split into sequential single-change runs; grep target string locally before delegating |
+| Wrote a Python helper just to replace code | Misdiagnosed search_replace limit | Use search_replace directly for ASCII code; write_file only if new content is too long for the prompt |
+| Empty run — 0 files changed despite ≥3 tool calls | Multi-edit prompt: first `search_replace` target not found byte-for-byte | Split into sequential single-change runs; grep target string locally before delegating |
 
 **If exit non-zero:** do not relaunch immediately. Read the diff, understand what was done, fix the prompt.
 
@@ -278,7 +272,7 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 - **Max 3 attempts** per sub-task before escalating to the user.
 - Between attempts, **read the git diff** to avoid doubling partial work.
 - If Vibe completed ≥50% and crashed: finish the rest manually rather than relaunching.
-- **After finishing manually:** run `python3 tools/log-manual.py` to log the intervention — keeps `/vibe-report` cost accounting accurate.
+- **After finishing manually:** run `python3 tools/log-manual.py` to log the intervention.
 
 ---
 
@@ -300,18 +294,18 @@ Ready to commit?
 
 ## Orchestration rules
 
-- **Decompose before delegating** — an oversized prompt is guaranteed to fail.
-- **Streaming always** — `--output text` hides errors and blocks until the end.
+- **Decompose before delegating** — one task, one prompt.
+- **Streaming always** — never `--output text`.
 - **Check diff between sub-tasks** — never launch the next one blind.
 - **Don't code instead of Vibe** unless Vibe completed ≥50% and crashed.
-- **Max 12 turns per call** — beyond that, Mistral context saturates.
-- **Grep target before delegating** — `grep -n "exact_target" file.py` before any `search_replace` prompt. No match = empty run. Pass that anchor as `--require "exact_target"` so the delegate aborts before launching if it's gone. Always use grep for VERIFY, not file re-read.
+- **Max 12 turns per call** — decompose instead of extending.
+- **Grep target before delegating** — `grep -n "exact_target" file.py` before any `search_replace` prompt. Pass that anchor as `--require "exact_target"` so the delegate aborts before launching if it's gone. Always use grep for VERIFY, not file re-read.
 - **Match model to task** — inline-edit tasks → `deepseek-flash` or `mistral-medium-3.5`; never route edits to agent-mode `devstral-small` (read/explore only).
 - **UTF-8 / emoji in the prompt** → the script handles it via temp file, but test with a short prompt first.
-- **After any run that touches imports: grep the import line** — sequential runs can revert each other's import changes. Always run `grep "^from X import" file.py` before the next sub-task.
-- **search_replace [OK] ≠ correct change** — Vibe may report OK even if the match was on unintended content. Always grep the specific changed line, not just check syntax.
-- **Provide data structure context** — Vibe writes against what it knows. If a route accesses a DB payload, include the exact field paths (`payload['produit']['nom']`) in the prompt, not just "extract the name".
-- **Reuse existing assets** — for UI tasks, tell Vibe to link existing CSS/JS files rather than generating new styles. "Use `/static/style.css` and CSS class `bar-row`" is always better than "generate a dark theme".
+- **After any run that touches imports: grep the import line** — always run `grep "^from X import" file.py` before the next sub-task.
+- **search_replace [OK] ≠ correct change** — always grep the specific changed line, not just check syntax.
+- **Provide data structure context** — if a route accesses a DB payload, include the exact field paths (`payload['produit']['nom']`) in the prompt.
+- **Reuse existing assets** — for UI tasks, tell Vibe to link existing CSS/JS files. "Use `/static/style.css` and CSS class `bar-row`" is always better than "generate a dark theme".
 
 ---
 
