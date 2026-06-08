@@ -157,6 +157,7 @@ VERIFY: grep for "def function_name" in file.py and confirm it exists.
 
 **Prompt adaptations:**
 - **Any task that defines or calls a specific function**: include the exact signature — `def validate(data: dict) -> tuple[bool, list[str]]:`.
+- **No fixed signature, but conventions matter**: point at the file to read first ("read app.py, follow its route/jsonify style") instead — don't do both, they're substitutes.
 - **Write/modify tasks**: append an output format block:
   ```
   OUTPUT FORMAT:
@@ -332,3 +333,5 @@ Or via Claude Code: `/vibe-report [args]`. Log fields and jq queries → `SKILL-
 
 A sister delegate using Gemini CLI exists: [gemini-skill](https://github.com/pcx-wave/gemini-skill).
 Both write to the same `delegate-runs.jsonl` log, making runs comparable across delegates.
+
+This skill is improved regularly — run [update-skills](https://github.com/pcx-wave/update-skills) to pull the latest version of this skill, as well as all your other skills!
