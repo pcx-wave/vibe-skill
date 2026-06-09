@@ -47,15 +47,16 @@ Snapshot over **2,450 vibe delegations**, 2026-05-12 → 2026-06-08 (28 days). P
 | Tokens delegated | 155.2M |
 | Exit-success rate | 79% |
 | Avg run duration | 32s |
-| **Est. real cost** | **$0.67 DeepSeek + Le Chat Pro sub (~$18/mo, covers all Mistral)** |
+| **Real cost (with sub)** | **$0 Mistral (Le Chat Pro ~$18/mo) + $0.67 DeepSeek** |
+| Mistral at API rate (no sub) | ~$37 |
 | Same workload on Claude Sonnet 4.6 | ~$139 (cache-aware, 90.5% hit rate) |
 
 **By model**
 
-| Model | Runs | Exit-ok | Tokens | Est. real cost | vs Claude |
-|---|---|---|---|---|---|
-| mistral (Le Chat Pro) | 1,911 | 78% | 111.9M | $0 (sub) | ~$101 |
-| deepseek-flash | 369 | 88% | 35.5M | $0.67 | ~$32 |
+| Model | Runs | Exit-ok | Tokens | With sub | API ref (no sub) | vs Claude |
+|---|---|---|---|---|---|---|
+| mistral (Le Chat Pro) | 1,911 | 78% | 111.9M | $0 | ~$37 | ~$101 |
+| deepseek-flash | 369 | 88% | 35.5M | $0.67 | $0.67 | ~$32 |
 
 > Real cost methodology: All Mistral runs (mistral-medium-3.5 + Le Chat interface) covered by Le Chat Pro subscription — $0 marginal cost. DeepSeek $0.67 is actual spend (from logs). Hit rate of 90.5% back-calculated from that spend. Claude equivalent applies the same hit rate with Claude's cache pricing ($0.30/M hits, $3/M misses, $15/M output), assuming 97.6% input / 2.4% output split.
 
@@ -83,7 +84,7 @@ The 26% `exit_error` + `wrote_nothing` share one root cause: `search_replace` an
 | Runs | 2,450 | 254 |
 | Tokens | 155.2M | 8.5M |
 | Exit-ok | 79% | 81% |
-| API-rate cost (reference) | $187.67 | $0 (free tiers) |
+| Real cost | $0.67 + ~$18/mo sub | $0 (free tiers) |
 | Models | mistral-medium, deepseek-flash (paid, capable) | free deepseek / mimo / nemotron tiers |
 
 Same headline exit-rate, very different profile: `opencode` runs free tiers at zero cost but with high `silent_exit` and timeout rates. Use it for cheap exploration; vibe's paid models are the choice when the edit has to land. Both write to the same log — `/vibe-report --all` compares them.
