@@ -31,37 +31,36 @@ Summary:
 
 > Costs based on official pricing (May 2026): Claude $3/$15 per M tokens, Mistral Medium 3.5 $1.50/$7.50, DeepSeek V4 Flash $0.14/$0.28. Assumes ≈85% input / 15% output, typical for coding tasks. Claude orchestration overhead: ≈500 tokens per run (negligible).
 
+> **Delegation does cost Claude tokens** — writing the prompt and reading the diff back. But the real lever is context: when Claude does the work directly, every file read accumulates in its context and is re-read on every subsequent turn. When Vibe does it, none of that enters Claude's context at all. Measured breakeven: **≈4 source files touched per task**. Below that, direct is cheaper. Above it, delegation wins by a growing margin (+66% at 10 files, +89% at 30 files). See [handoff-probe/ECONOMICS.md](https://github.com/pcx-wave/handoff-probe/blob/main/ECONOMICS.md) for the full analysis.
+
 > **Le Chat Pro users:** Mistral Vibe is included in the [Le Chat Pro](https://mistral.ai/pricing) subscription (≈$18/mo). Mistral does not publicly document the exact usage limits, but community reports suggest ≈1–1.5B tokens/month are included. Within that allowance every delegation costs $0 in API fees — cheaper than any paid model.
 
-### Delegation synthesis — as of 2026-05-30
+### Delegation synthesis — as of 2026-06-08
 
-Snapshot over **2,103 vibe delegations**, 2026-05-12 → 2026-05-30 (19 days). Pulled from the shared run log via `delegate-report` (vibe scope).
+Snapshot over **2,450 vibe delegations**, 2026-05-12 → 2026-06-08 (28 days). Pulled from the shared run log via `delegate-report` (vibe scope).
 
 **Performance & savings**
 
 | Metric | Value |
 |---|---|
-| Delegations | 2,103 |
-| Tokens delegated | 139.8M |
-| Exit-success rate | 81% |
-| Clean rate (no soft failure) | 67% |
-| Avg run duration | 33s |
-| **Actually paid** | **≈$0.67 DeepSeek (32M tokens) + Le Chat Pro sub (≈$18/mo)** |
-| Same workload on Claude Sonnet 4.6 | $456.94 |
-| **Effective saving** | **≈ 24× cheaper than Claude** |
+| Delegations | 2,450 |
+| Tokens delegated | 155.2M |
+| Exit-success rate | 79% |
+| Avg run duration | 32s |
+| **Est. real cost** | **~$37 Mistral API + $0.67 DeepSeek + Le Chat Pro sub (~$18/mo)** |
+| Same workload on Claude Sonnet 4.6 | ~$139 (cache-aware, 90.5% hit rate) |
 
 **By model**
 
-| Model | Runs | Exit-ok | Avg dur | Tokens | API-rate cost* | vs Claude |
-|---|---|---|---|---|---|---|
-| mistral-medium-3.5 | 1,718 | 79% | 31s | 104.2M | $137.09 | $206.24 |
-| deepseek-flash | 269 | 93% | 41s | 32.1M | $35.43 | $67.12 |
-| devstral-small | 68 | 63% | 19s | 2.6M | $0.26 | $7.81 |
-| mistral (Le Chat) | 48 | 95% | 43s | 0.9M | $1.49 | $1.49 |
+| Model | Runs | Exit-ok | Tokens | Est. real cost | vs Claude |
+|---|---|---|---|---|---|
+| mistral-medium-3.5 | 1,863 | 78% | 111.0M | ~$37 | ~$100 |
+| deepseek-flash | 369 | 88% | 35.5M | $0.67 | ~$32 |
+| mistral (Le Chat) | 48 | 95% | 0.9M | $0 (sub) | ~$0.85 |
 
-\* Pay-as-you-go reference — mistral-medium ran on Le Chat Pro sub ($0 marginal); DeepSeek real cost was $0.67 (cache-aware), not $35.43.
+> Real cost methodology: DeepSeek $0.67 is actual spend (from logs). Hit rate of 90.5% back-calculated from that spend. Mistral ~$37 estimated by applying 90.5% hit rate with Mistral's likely-free cache hits (per community feedback): output $21.89 + cache-miss input $15.34. Claude equivalent applies the same hit rate with Claude's cache pricing ($0.30/M hits, $3/M misses, $15/M output), assuming 97.6% input / 2.4% output split. Actual may differ if hit ratios diverge.
 
-`deepseek-flash` is the value pick (93% exit-ok at ≈$0.0025/run). `devstral-small` underperforms for edits — use it for read/explore only.
+`deepseek-flash` is the value pick (88% exit-ok at ≈$0.0025/run).
 
 **Error rate** (real projects, 1,964 runs — synthetic test scaffolds excluded)
 
@@ -82,10 +81,10 @@ The 26% `exit_error` + `wrote_nothing` share one root cause: `search_replace` an
 
 | | vibe | opencode |
 |---|---|---|
-| Runs | 2,103 | 254 |
-| Tokens | 139.8M | 8.5M |
-| Exit-ok | 81% | 81% |
-| API-rate cost (reference) | $174.28 | $0 (free tiers) |
+| Runs | 2,450 | 254 |
+| Tokens | 155.2M | 8.5M |
+| Exit-ok | 79% | 81% |
+| API-rate cost (reference) | $187.67 | $0 (free tiers) |
 | Models | mistral-medium, deepseek-flash (paid, capable) | free deepseek / mimo / nemotron tiers |
 
 Same headline exit-rate, very different profile: `opencode` runs free tiers at zero cost but with high `silent_exit` and timeout rates. Use it for cheap exploration; vibe's paid models are the choice when the edit has to land. Both write to the same log — `/vibe-report --all` compares them.
