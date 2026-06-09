@@ -47,18 +47,17 @@ Snapshot over **2,450 vibe delegations**, 2026-05-12 → 2026-06-08 (28 days). P
 | Tokens delegated | 155.2M |
 | Exit-success rate | 79% |
 | Avg run duration | 32s |
-| **Est. real cost** | **~$37 Mistral API + $0.67 DeepSeek + Le Chat Pro sub (~$18/mo)** |
+| **Est. real cost** | **$0.67 DeepSeek + Le Chat Pro sub (~$18/mo, covers all Mistral)** |
 | Same workload on Claude Sonnet 4.6 | ~$139 (cache-aware, 90.5% hit rate) |
 
 **By model**
 
 | Model | Runs | Exit-ok | Tokens | Est. real cost | vs Claude |
 |---|---|---|---|---|---|
-| mistral-medium-3.5 | 1,863 | 78% | 111.0M | ~$37 | ~$100 |
+| mistral (Le Chat Pro) | 1,911 | 78% | 111.9M | $0 (sub) | ~$101 |
 | deepseek-flash | 369 | 88% | 35.5M | $0.67 | ~$32 |
-| mistral (Le Chat) | 48 | 95% | 0.9M | $0 (sub) | ~$0.85 |
 
-> Real cost methodology: DeepSeek $0.67 is actual spend (from logs). Hit rate of 90.5% back-calculated from that spend. Mistral ~$37 estimated by applying 90.5% hit rate with Mistral's likely-free cache hits (per community feedback): output $21.89 + cache-miss input $15.34. Claude equivalent applies the same hit rate with Claude's cache pricing ($0.30/M hits, $3/M misses, $15/M output), assuming 97.6% input / 2.4% output split. Actual may differ if hit ratios diverge.
+> Real cost methodology: All Mistral runs (mistral-medium-3.5 + Le Chat interface) covered by Le Chat Pro subscription — $0 marginal cost. DeepSeek $0.67 is actual spend (from logs). Hit rate of 90.5% back-calculated from that spend. Claude equivalent applies the same hit rate with Claude's cache pricing ($0.30/M hits, $3/M misses, $15/M output), assuming 97.6% input / 2.4% output split.
 
 `deepseek-flash` is the value pick (88% exit-ok at ≈$0.0025/run).
 
