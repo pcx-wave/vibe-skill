@@ -393,8 +393,8 @@ if [ "$GIT_BEFORE" != "$GIT_AFTER" ]; then
 else
   echo ""
   echo "=== UNCOMMITTED CHANGES ==="
-  git diff --stat 2>/dev/null || echo "(no git)"
-  git status --short 2>/dev/null
+  git diff --stat -- "$WORKDIR" 2>/dev/null || echo "(no git)"
+  git status --short -- "$WORKDIR" 2>/dev/null
 fi
 
 
