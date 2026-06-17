@@ -45,6 +45,15 @@ MAX_TURNS="${3:-10}"
 AGENT="${4:-}"
 TIMEOUT_SECS="${5:-180}"
 
+# Hard ceiling: SKILL.md has documented "never exceed 12 turns, decompose instead"
+# since 2026-05, but nothing enforced it — one observed session (2026-06-17) ran
+# a 4-file refactor at max-turns=12 that still only got 2/4 files done for 334k tokens.
+# Decomposition was the documented fix; this makes it impossible to skip by accident.
+if [ "$MAX_TURNS" -gt 12 ] 2>/dev/null; then
+  echo "WARNING: max-turns $MAX_TURNS exceeds the hard cap of 12 — clamping to 12. Decompose the task into sequential runs instead of raising this." >&2
+  MAX_TURNS=12
+fi
+
 if [ ! -d "$WORKDIR" ]; then
   echo "ERROR: workdir '$WORKDIR' does not exist" >&2
   exit 1
@@ -96,8 +105,13 @@ START_NS=$(date +%s%N)
 PROMPT_WORDS=$(printf '%s' "$PROMPT" | wc -w | tr -d ' ')
 GIT_BEFORE=$(git rev-parse HEAD 2>/dev/null || echo "no-git")
 
-# Track modified files for post-run syntax checks
-FILES_BEFORE=$(git diff --name-only 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null)
+# Sentinel file for mtime-based change detection. `git diff --name-only` is binary
+# (modified-vs-not), so it misses a re-edit to a file that was ALREADY dirty before
+# this run started — exactly what happens with sequential same-file delegations,
+# which RC-2 itself recommends as the mitigation for parallel edits. It also reports
+# nothing at all in a non-git workdir. mtime-since-sentinel catches every real write
+# regardless of prior git state.
+SENTINEL=$(mktemp /tmp/vibe-sentinel-XXXXXX)
 
 echo "=== VIBE START ==="
 echo "Workdir : $WORKDIR"
@@ -122,7 +136,7 @@ DELEGATE_STATS_FILE=$(mktemp /tmp/delegate-stats-XXXXXX.json)
 printf '{}' > "$DELEGATE_STATS_FILE"
 export DELEGATE_STATS_FILE
 
-trap 'rm -f "$VIBE_SCRIPT" "$PROMPT_FILE" "$DELEGATE_STATS_FILE"' EXIT
+trap 'rm -f "$VIBE_SCRIPT" "$PROMPT_FILE" "$DELEGATE_STATS_FILE" "$SENTINEL"' EXIT
 
 {
   echo '#!/usr/bin/env bash'
@@ -147,6 +161,7 @@ ANSI_RE = re.compile(r'\x1b\[[0-9;]*[mABCDEFGHJKSTfhilmnprsu]|\x1b\([AB]|\x0f|\x
 tools_called = 0
 warn_count = 0
 sr_fails = 0
+sandbox_blocked = False
 writes = []
 def clean(line):
     line = line.replace('\r', '')
@@ -166,6 +181,9 @@ for raw in sys.stdin:
 
     if role in ('system', 'user'):
         continue
+
+    if 'not permitted' in content.lower():
+        sandbox_blocked = True
 
     if role == 'assistant':
         text = content.strip()
@@ -209,7 +227,7 @@ _sf = os.environ.get('DELEGATE_STATS_FILE', '')
 if _sf:
     try:
         with open(_sf, 'w') as _f:
-            json.dump({'tool_calls': tools_called, 'warn_count': warn_count, 'search_replace_fails': sr_fails}, _f)
+            json.dump({'tool_calls': tools_called, 'warn_count': warn_count, 'search_replace_fails': sr_fails, 'sandbox_blocked': sandbox_blocked}, _f)
     except Exception:
         pass
 "
@@ -218,6 +236,18 @@ VIBE_EXIT=${PIPESTATUS[0]}
 # ── Real Mistral token counts from session log ─────────────────────────────────
 VIBE_HOME="${VIBE_HOME:-$HOME/.vibe}"
 SESSION_LOG=$(ls -t "$VIBE_HOME/logs/session"/*/meta.json 2>/dev/null | head -1)
+# Guard against attributing a STALE session's tokens to this run. If vibe never
+# wrote its own meta.json (e.g. it died before starting a session), the most
+# recent file on disk is some earlier run's — happened on 2026-06-17 where a
+# failed code-reviewer run silently inherited the prior run's 363,506 tokens.
+if [ -n "$SESSION_LOG" ]; then
+  SESSION_LOG_MTIME=$(stat -c %Y "$SESSION_LOG" 2>/dev/null || echo 0)
+  START_SECS=$((START_NS / 1000000000))
+  if [ "$SESSION_LOG_MTIME" -lt "$START_SECS" ]; then
+    SESSION_LOG=""
+    echo "(no session log newer than run start — token count unknown, not reusing stale data)"
+  fi
+fi
 if [ -n "$SESSION_LOG" ]; then
   python3 -c "
 import json, sys, os
@@ -308,8 +338,10 @@ else
 fi
 
 # ── Post-run syntax checks — language-agnostic ────────────────────────────────
-FILES_AFTER=$(git diff --name-only 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null)
-CHANGED=$(comm -13 <(echo "$FILES_BEFORE" | sort) <(echo "$FILES_AFTER" | sort) 2>/dev/null)
+# CWD is $WORKDIR (cd happened before launch). Anything with an mtime newer than
+# the sentinel was actually written during this run — true regardless of whether
+# the file was tracked, untracked, already dirty, or this is a non-git directory.
+CHANGED=$(find . -type f -newer "$SENTINEL" -not -path './.git/*' 2>/dev/null | sed 's|^\./||')
 
 SYNTAX_COUNT_FILE=$(mktemp /tmp/vibe-syntax-count-XXXXXX.txt)
 echo 0 > "$SYNTAX_COUNT_FILE"
@@ -501,13 +533,23 @@ _agent    = entry.get('agent', 'default')
 if entry.get('timed_out'):
     _reason = 'timeout'
 elif _exit not in (0, 124):
-    _reason = 'exit_error'
+    # A sandbox "Tool execution not permitted" message inflates exit to 1 even when
+    # the files were actually written (seen 2026-06-17, run with fc=2 still logged
+    # exit_error). Don't let that mask a real success.
+    if stats.get('sandbox_blocked') and _fc > 0:
+        _reason = 'sandbox_blocked_ok'
+    else:
+        _reason = 'exit_error'
 elif entry.get('syntax_errors', 0) > 0:
     _reason = 'syntax_error'
 elif entry.get('search_replace_fails', 0) > 0:
     _reason = 'sr_fail'
-elif _tok_out == 0 and _tc == 0 and _agent not in _readonly_agents:
-    _reason = 'silent_exit'
+elif _tc == 0 and _fc == 0 and _agent not in _readonly_agents:
+    # Zero tool calls always means nothing was written, regardless of how much text
+    # came back. Previously this only fired when tok_out was ALSO 0, which is exactly
+    # how the mistral-medium "narrate the file instead of calling write_file" failure
+    # (observed 2026-06-17 — tc=0, fc=0, but tok_out large) got logged as 'ok'.
+    _reason = 'narrated_no_tools' if _tok_out > 0 else 'silent_exit'
 elif _tok_out < 50 and _fc == 0 and _tc < 3 and _agent not in _readonly_agents:
     _reason = 'near_empty'
 elif _fc == 0 and _tc >= 3 and _exit == 0 and _agent not in _readonly_agents:
