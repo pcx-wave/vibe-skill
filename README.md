@@ -197,6 +197,37 @@ By default, Vibe uses whatever `active_model` is set in `~/.vibe/config.toml`. Y
 /vibestatus                   — shows both auto-mode state and active model override
 ```
 
+`/vibe-model-pick` only lists models that already exist in `~/.vibe/config.toml`. To use a model that isn't there yet, you have to add it first — e.g. to add DeepSeek:
+
+1. Add a `[[providers]]` block with the API endpoint and the env var holding the key (never put the key itself in the file):
+
+   ```toml
+   [[providers]]
+   name = "deepseek"
+   api_key_env_var = "DEEPSEEK_API_KEY"
+   api_base = "https://api.deepseek.com"
+   api_style = "openai"
+   backend = "generic"
+   ```
+
+2. Add a `[[models]]` block pointing at that provider, with an `alias` you'll use to select it:
+
+   ```toml
+   [[models]]
+   name = "deepseek-v4-flash"
+   provider = "deepseek"
+   alias = "deepseek-flash"
+   temperature = 0.7
+   input_price = 0.14
+   output_price = 0.28
+   ```
+
+3. Export the key in your shell env: `export DEEPSEEK_API_KEY=sk-...`
+
+4. Either set `active_model = "deepseek-flash"` at the top of `config.toml` to make it the permanent default, or run `/vibe-model-pick deepseek-flash` to use it for the current session only.
+
+`input_price`/`output_price` are only used for Vibe's own cost-tracking display — they're optional and don't affect functionality.
+
 The override is stored in `~/.local/share/vibe-model.flag` and is picked up by `vibe-delegate` on every run. It persists across sessions until you clear it.
 
 ### Vibe-auto mode
