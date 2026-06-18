@@ -253,8 +253,8 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 | `[WARN]` | Vibe encountered an error | Read the error, fix manually |
 | `[tool]  search_replace [FAIL]` | UTF-8 match failure | Edit manually with Python `str.replace()` |
 | `exit: 1` or non-zero | Vibe failed / did not complete verification | Read diff, correct prompt |
-| No `[tool]  file:` lines | `WROTE_NOTHING` — Vibe read but wrote nothing | **STOP. Do not supply the code yourself.** Report file, signal, sub-task — halt the chain. |
-| Mangled tool name in output (e.g. `write_filecepte`) | Vibe produced a garbled tool call — write never executed | **STOP** same as WROTE_NOTHING — treat as failed write, not a partial success. |
+| No `[tool]  file:` lines | `WROTE_NOTHING` — Vibe read but wrote nothing | Do not supply the code yourself. Follow Step 6 retry/escalation rules. |
+| Mangled tool name in output (e.g. `write_filecepte`) | Vibe produced a garbled tool call — write never executed | Same as WROTE_NOTHING — treat as failed write. Follow Step 6. |
 | `=== SYNTAX ERRORS ===` | Post-run syntax check failed | **Fix before committing** |
 | Same file read 5+ times | Vibe is looping — run likely lost | Abort, check diff, try again |
 
@@ -276,25 +276,30 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 - **Max 3 attempts** per sub-task before escalating to the user.
 - Between attempts, **read the git diff** to avoid doubling partial work.
 
-### WROTE_NOTHING / failed write — mandatory stop
+### WROTE_NOTHING / failed write — auto-retry then escalate
 
 When a run produces any of the following:
 - No `[tool]  file:` lines (WROTE_NOTHING)
 - Mangled tool call output (e.g. `write_filecepte`, `search_replacecepte`)
 - Non-zero exit with 0 files changed
 
-**Stop immediately. Do not write the code yourself and pass it to Vibe as content.** Report:
+**Do not write the code yourself.** Revise the prompt (simpler target, explicit file path, shorter scope) and re-run. This counts against the 3-attempt limit.
+
+If all 3 attempts produce WROTE_NOTHING or failed writes, stop and ask the user:
 
 ```
-⛔ Vibe wrote nothing — halting chain.
+⛔ Vibe wrote nothing after 3 attempts — halting chain.
   File expected : <path>
   Failure signal: <WROTE_NOTHING | mangled write | exit N, 0 files>
   Sub-task      : <description>
 
-Fix prompt and retry, or run /vibe --allow-ghostwriting to permit fallback.
+Options:
+  (r) Revise prompt manually and retry
+  (g) Allow ghostwriting for this sub-task (--allow-ghostwriting)
+  (a) Abort
 ```
 
-Do not proceed to subsequent sub-tasks.
+Do not proceed to subsequent sub-tasks until resolved.
 
 ### `--allow-ghostwriting` opt-in
 
@@ -321,6 +326,16 @@ Files modified:
 ⚠ <description> — completing manually / relaunching?
 
 Ready to commit?
+```
+
+**When `--verbose` was passed:** after the file list, quote the full token/cost block verbatim from the script output — the lines starting with `Model`, `  Input`, `  Output`, `  Total`, `  Claude`. Do not paraphrase or summarize them. Example:
+
+```
+Model               : mistral-medium-3.5
+  Input  :     45,120  @  $1.50/M  = $0.0677
+  Output :      1,280  @  $7.50/M  = $0.0096
+  Total  :     46,400              = $0.0773
+  Claude :     46,400  (@ $3/$15/M)  = $0.1531  (x1.98 cheaper)
 ```
 
 ---
@@ -409,7 +424,7 @@ When `--with-review` is not used, all five fields are omitted (do not write them
 - **Decompose before delegating** — one task, one prompt.
 - **Streaming always** — never `--output text`.
 - **Check diff between sub-tasks** — never launch the next one blind.
-- **Never ghostwrite** — do not write code yourself and pass it to Vibe as content. Default on WROTE_NOTHING or failed write is STOP + report. Only permitted with `--allow-ghostwriting`, which must be declared in the Step 7 report.
+- **Never ghostwrite** — do not write code yourself and pass it to Vibe as content. On WROTE_NOTHING or failed write, follow the retry/escalation rules in Step 6. Only permitted with `--allow-ghostwriting`, which must be declared in the Step 7 report.
 - **Max 12 turns per call** — decompose instead of extending.
 - **Grep target before delegating** — `grep -n "exact_target" file.py` before any `search_replace` prompt. Pass that anchor as `--require "exact_target"` so the delegate aborts before launching if it's gone. Always use grep for VERIFY, not file re-read.
 - **Match model to task** — inline-edit tasks → `deepseek-flash` or `mistral-medium-3.5`; never route edits to agent-mode `devstral-small` (read/explore only).
@@ -440,15 +455,7 @@ Log fields and jq queries → see `SKILL-reference.md`.
 
 Or via Claude Code: `/vibe-report [args]`. Log fields and jq queries → `SKILL-reference.md`.
 
-**Review pass fields** (present only when `--with-review N` was used):
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `review_iterations_allowed` | int | N value passed by user |
-| `review_iterations_used` | int | Iterations actually consumed |
-| `review_issues_found` | int | Fundamental issues found in initial diff |
-| `review_issues_fixed` | int | Issues resolved by re-delegation |
-| `review_issues_remaining` | int | Issues still open after iterations exhausted |
+**Review pass fields** — see §8.6 for log field definitions. Present only when `--with-review N` was used.
 
 ---
 
