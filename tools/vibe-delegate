@@ -31,9 +31,11 @@
 # the workdir or the run is aborted before launch (see pre-flight gate below).
 REQUIRES=()
 POSITIONAL=()
+VERBOSE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --require) REQUIRES+=("$2"); shift 2 ;;
+    --verbose) VERBOSE=1; shift ;;
     *) POSITIONAL+=("$1"); shift ;;
   esac
 done
@@ -99,6 +101,7 @@ if [ -f "$VIBE_MODEL_FLAG" ]; then
   VIBE_MODEL_OVERRIDE=$(tr -d '[:space:]' < "$VIBE_MODEL_FLAG")
   export VIBE_ACTIVE_MODEL="$VIBE_MODEL_OVERRIDE"
 fi
+export DELEGATE_VERBOSE="$VERBOSE"
 
 cd "$WORKDIR"
 START_NS=$(date +%s%N)
@@ -115,7 +118,7 @@ SENTINEL=$(mktemp /tmp/vibe-sentinel-XXXXXX)
 
 echo "=== VIBE START ==="
 echo "Workdir : $WORKDIR"
-echo "Agent   : ${AGENT:-default}"
+echo "Agent   : ${AGENT:-auto-approve}"
 echo "Model   : ${VIBE_MODEL_OVERRIDE:-(config default)}"
 echo "Turns   : $MAX_TURNS"
 echo "Timeout : ${TIMEOUT_SECS}s"
@@ -141,13 +144,11 @@ trap 'rm -f "$VIBE_SCRIPT" "$PROMPT_FILE" "$DELEGATE_STATS_FILE" "$SENTINEL"' EX
 {
   echo '#!/usr/bin/env bash'
   echo "PROMPT_CONTENT=$(printf '%q' "$(cat "$PROMPT_FILE")")"
-  if [ -n "$AGENT" ]; then
-    printf 'exec vibe --agent %q -p "$PROMPT_CONTENT" --trust --max-turns %q --output streaming --workdir %q\n' \
-      "$AGENT" "$MAX_TURNS" "$WORKDIR"
-  else
-    printf 'exec vibe -p "$PROMPT_CONTENT" --trust --max-turns %q --output streaming --workdir %q\n' \
-      "$MAX_TURNS" "$WORKDIR"
-  fi
+  # auto-approve is required for non-interactive tool execution (file writes, python3, etc.)
+  # Explicit --agent overrides this; named agents like code-reviewer don't need it.
+  _VIBE_AGENT="${AGENT:-auto-approve}"
+  printf 'exec vibe --agent %q -p "$PROMPT_CONTENT" --trust --max-turns %q --output streaming --workdir %q\n' \
+    "$_VIBE_AGENT" "$MAX_TURNS" "$WORKDIR"
 } > "$VIBE_SCRIPT"
 chmod +x "$VIBE_SCRIPT"
 
@@ -306,9 +307,26 @@ try:
     # so all input is priced at the full input rate. Treat cost_usd as an upper bound.
     run_cost = (run_tokens_in * input_price + run_tokens_out * output_price) / 1_000_000
     claude_cost = (run_tokens_in * 3.0 + run_tokens_out * 15.0) / 1_000_000
+    verbose = os.environ.get('DELEGATE_VERBOSE', '0') == '1'
     print(f'Model               : {model_name}')
-    print(f'Delegate tokens (run): {run_total:,}  (last turn: {prompt:,}+{completion:,})  |  cost ~\${run_cost:.4f}')
-    print(f'Claude Sonnet 4.6 eq: same tokens would cost ~\${claude_cost:.4f}  (ratio x{claude_cost/run_cost:.1f})' if run_cost > 0 else f'Claude Sonnet 4.6 eq: ~\${claude_cost:.4f}')
+    if verbose:
+        in_cost  = run_tokens_in  * input_price  / 1_000_000
+        out_cost = run_tokens_out * output_price / 1_000_000
+        cl_in    = run_tokens_in  * 3.0  / 1_000_000
+        cl_out   = run_tokens_out * 15.0 / 1_000_000
+        print(f'  Input  : {run_tokens_in:>10,}  @ ${input_price:>5.2f}/M  = ${in_cost:.4f}')
+        print(f'  Output : {run_tokens_out:>10,}  @ ${output_price:>5.2f}/M  = ${out_cost:.4f}')
+        print(f'  Total  : {run_total:>10,}              = ${run_cost:.4f}')
+        if run_cost > 0:
+            print(f'  Claude : {run_total:>10,}  (@ $3/$15/M)  = ${claude_cost:.4f}  (x{claude_cost/run_cost:.1f} cheaper)')
+        else:
+            print(f'  Claude equiv            = ${claude_cost:.4f}')
+    else:
+        print(f'Delegate tokens (run): {run_total:,}  (last turn: {prompt:,}+{completion:,})  |  cost ~\${run_cost:.4f}')
+        if run_cost > 0:
+            print(f'Claude Sonnet 4.6 eq: same tokens would cost ~\${claude_cost:.4f}  (ratio x{claude_cost/run_cost:.1f})')
+        else:
+            print(f'Claude Sonnet 4.6 eq: ~\${claude_cost:.4f}')
     # Merge token stats into the delegate stats file.
     sf = os.environ.get('DELEGATE_STATS_FILE', '')
     if sf:
@@ -441,7 +459,7 @@ export DELEGATE_WORKDIR="$WORKDIR"
 export DELEGATE_EXIT="$VIBE_EXIT"
 export DELEGATE_TIMEOUT="$TIMEOUT_SECS"
 export DELEGATE_PROMPT_WORDS="$PROMPT_WORDS"
-export DELEGATE_AGENT="${AGENT:-default}"
+export DELEGATE_AGENT="${AGENT:-auto-approve}"
 export DELEGATE_MAX_TURNS="$MAX_TURNS"
 export DELEGATE_FILES_CHANGED="$FILES_CHANGED_COUNT"
 export DELEGATE_SYNTAX_ERRORS="$TOTAL_ERRORS"

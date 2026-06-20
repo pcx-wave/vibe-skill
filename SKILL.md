@@ -192,12 +192,14 @@ VERIFY: grep for "def extract_labels" in app.py and confirm it exists.
 | `agent`        | *(none)* | See agent table below                           |
 | `timeout-secs` | `180`    | Wall-clock kill timer                           |
 | `--require STR` | *(none)* | Repeatable. Abort before launch if STR is absent in the workdir — pass the `search_replace` anchor here |
+| `--with-review N` | *(none)* | After Vibe finishes, Claude reviews the diff and re-delegates fixes up to N times (see Step 8) |
+| `--verbose` | *(off)* | Print per-token-type cost breakdown (input/output tokens × pricing) instead of the compact summary line |
 
 **Available agents:**
 
 | Agent | Use |
 |-------|-----|
-| *(default)* | General implementation |
+| *(default → `auto-approve`)* | General implementation — all tools run without approval |
 | `code-reviewer` | Review only, no changes |
 | `planner` | Planning before implementing |
 | `code-architect` | Architecture design, read-only |
@@ -251,7 +253,8 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 | `[WARN]` | Vibe encountered an error | Read the error, fix manually |
 | `[tool]  search_replace [FAIL]` | UTF-8 match failure | Edit manually with Python `str.replace()` |
 | `exit: 1` or non-zero | Vibe failed / did not complete verification | Read diff, correct prompt |
-| No `[tool]  file:` lines | `WROTE_NOTHING` — Vibe read but wrote nothing | Do not compensate — fix prompt and relaunch |
+| No `[tool]  file:` lines | `WROTE_NOTHING` — Vibe read but wrote nothing | Do not supply the code yourself. Follow Step 6 retry/escalation rules. |
+| Mangled tool name in output (e.g. `write_filecepte`) | Vibe produced a garbled tool call — write never executed | Same as WROTE_NOTHING — treat as failed write. Follow Step 6. |
 | `=== SYNTAX ERRORS ===` | Post-run syntax check failed | **Fix before committing** |
 | Same file read 5+ times | Vibe is looping — run likely lost | Abort, check diff, try again |
 
@@ -272,8 +275,42 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 
 - **Max 3 attempts** per sub-task before escalating to the user.
 - Between attempts, **read the git diff** to avoid doubling partial work.
-- If Vibe completed ≥50% and crashed: finish the rest manually rather than relaunching.
-- **After finishing manually:** run `python3 /home/pcx-pi/vibe-skill/tools/log-manual.py` to log the intervention.
+
+### WROTE_NOTHING / failed write — auto-retry then escalate
+
+When a run produces any of the following:
+- No `[tool]  file:` lines (WROTE_NOTHING)
+- Mangled tool call output (e.g. `write_filecepte`, `search_replacecepte`)
+- Non-zero exit with 0 files changed
+
+**Do not write the code yourself.** Revise the prompt (simpler target, explicit file path, shorter scope) and re-run. This counts against the 3-attempt limit.
+
+If all 3 attempts produce WROTE_NOTHING or failed writes, stop and ask the user:
+
+```
+⛔ Vibe wrote nothing after 3 attempts — halting chain.
+  File expected : <path>
+  Failure signal: <WROTE_NOTHING | mangled write | exit N, 0 files>
+  Sub-task      : <description>
+
+Options:
+  (r) Revise prompt manually and retry
+  (g) Allow ghostwriting for this sub-task (--allow-ghostwriting)
+  (a) Abort
+```
+
+Do not proceed to subsequent sub-tasks until resolved.
+
+### `--allow-ghostwriting` opt-in
+
+When the user passes `--allow-ghostwriting` to `/vibe`, Claude may write the content and delegate only the file-write step to Vibe. **The Step 7 report must then explicitly list ghostwritten files:**
+
+```
+Files ghostwritten (Claude-authored, Vibe wrote):
+  - path/to/file.ext
+```
+
+Ghostwritten files must be listed separately from Vibe-authored files. Do not silently mix them.
 
 ---
 
@@ -291,6 +328,95 @@ Files modified:
 Ready to commit?
 ```
 
+**When `--verbose` was passed:** after the file list, quote the full token/cost block verbatim from the script output — the lines starting with `Model`, `  Input`, `  Output`, `  Total`, `  Claude`. Do not paraphrase or summarize them. Example:
+
+```
+Model               : mistral-medium-3.5
+  Input  :     45,120  @  $1.50/M  = $0.0677
+  Output :      1,280  @  $7.50/M  = $0.0096
+  Total  :     46,400              = $0.0773
+  Claude :     46,400  (@ $3/$15/M)  = $0.1531  (x1.98 cheaper)
+```
+
+---
+
+## Step 8 — Review pass (`--with-review N`)
+
+Triggered only when the user passes `--with-review N` to `/vibe`. Runs after Step 5 confirms exit 0.
+
+### 8.1 — Read the diff
+
+Run `git diff` (or `git diff HEAD` if changes are staged). Read the full output. This is Claude's review input — do not ask Vibe to review.
+
+### 8.2 — Classify issues
+
+Scan only for **fundamental issues**. Flag these:
+
+| Category | Examples |
+|----------|---------|
+| Incorrect logic | off-by-one, wrong branch condition, inverted boolean |
+| Crash-causing gap | unhandled None/null dereference, missing required field, index out of range |
+| Broken contract | function signature changed without updating callers, return type mismatch |
+| Wrong scope | change applied to wrong file/function/class |
+| Security hole | unsanitized user input passed to shell/SQL/eval, credentials in plaintext |
+
+**Do NOT flag:** style, naming, formatting, unused imports, performance, readability, or subjective preferences. If unsure whether an issue is fundamental, skip it.
+
+### 8.3 — Re-delegate one issue per iteration
+
+For each fundamental issue found (up to N):
+
+1. Write one atomic Vibe prompt targeting that single issue (follow Step 3 rules).
+2. Launch via `vibe-delegate` (same workdir, same model).
+3. After Vibe finishes, re-read the diff and re-evaluate: did the issue get fixed?
+4. Move to the next issue (or stop if N exhausted or no issues remain).
+
+**Never bundle two fixes into one prompt.** One issue → one delegation → one diff check.
+
+If N iterations are exhausted and issues remain, list them but do not attempt further fixes — report and stop.
+
+### 8.4 — Tracking state across iterations
+
+Maintain these counters locally (not persisted mid-run):
+
+```
+review_iterations_allowed  = N
+review_iterations_used     = 0
+review_issues_found        = <count from initial diff review>
+review_issues_fixed        = 0
+review_issues_remaining    = review_issues_found
+```
+
+Increment `review_iterations_used` and `review_issues_fixed` after each successful re-delegation. Update `review_issues_remaining` accordingly.
+
+### 8.5 — Report
+
+After all iterations or no issues remain, append to the Step 7 report:
+
+```
+Review pass (--with-review N):
+  Issues found:     X
+  Issues fixed:     Y
+  Issues remaining: Z
+  Iterations used:  A / N
+```
+
+If issues remain, list each one briefly (file:line — description). Do not re-attempt them.
+
+### 8.6 — Log fields
+
+After the review pass, the run log entry for the **original** Vibe run must include these additional fields in `~/.local/share/delegate-runs.jsonl`:
+
+```json
+"review_iterations_allowed": N,
+"review_iterations_used": A,
+"review_issues_found": X,
+"review_issues_fixed": Y,
+"review_issues_remaining": Z
+```
+
+When `--with-review` is not used, all five fields are omitted (do not write them as 0).
+
 ---
 
 ## Orchestration rules
@@ -298,7 +424,7 @@ Ready to commit?
 - **Decompose before delegating** — one task, one prompt.
 - **Streaming always** — never `--output text`.
 - **Check diff between sub-tasks** — never launch the next one blind.
-- **Don't code instead of Vibe** unless Vibe completed ≥50% and crashed.
+- **Never ghostwrite** — do not write code yourself and pass it to Vibe as content. On WROTE_NOTHING or failed write, follow the retry/escalation rules in Step 6. Only permitted with `--allow-ghostwriting`, which must be declared in the Step 7 report.
 - **Max 12 turns per call** — decompose instead of extending.
 - **Grep target before delegating** — `grep -n "exact_target" file.py` before any `search_replace` prompt. Pass that anchor as `--require "exact_target"` so the delegate aborts before launching if it's gone. Always use grep for VERIFY, not file re-read.
 - **Match model to task** — inline-edit tasks → `deepseek-flash` or `mistral-medium-3.5`; never route edits to agent-mode `devstral-small` (read/explore only).
@@ -328,6 +454,8 @@ Log fields and jq queries → see `SKILL-reference.md`.
 ```
 
 Or via Claude Code: `/vibe-report [args]`. Log fields and jq queries → `SKILL-reference.md`.
+
+**Review pass fields** — see §8.6 for log field definitions. Present only when `--with-review N` was used.
 
 ---
 
