@@ -194,6 +194,7 @@ VERIFY: grep for "def extract_labels" in app.py and confirm it exists.
 | `--require STR` | *(none)* | Repeatable. Abort before launch if STR is absent in the workdir — pass the `search_replace` anchor here |
 | `--with-review N` | *(none)* | After Vibe finishes, Claude reviews the diff and re-delegates fixes up to N times (see Step 8) |
 | `--verbose` | *(off)* | Print per-token-type cost breakdown (input/output tokens × pricing) instead of the compact summary line |
+| `--no-ghostwrite` | *(off)* | Disable the ghostwrite fallback — after 3 failed Vibe attempts, halt and ask instead of finishing (see Step 6) |
 
 **Available agents:**
 
@@ -253,7 +254,7 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 | `[WARN]` | Vibe encountered an error | Read the error, fix manually |
 | `[tool]  search_replace [FAIL]` | UTF-8 match failure | Edit manually with Python `str.replace()` |
 | `exit: 1` or non-zero | Vibe failed / did not complete verification | Read diff, correct prompt |
-| No `[tool]  file:` lines | `WROTE_NOTHING` — Vibe read but wrote nothing | Do not supply the code yourself. Follow Step 6 retry/escalation rules. |
+| No `[tool]  file:` lines | `WROTE_NOTHING` — Vibe read but wrote nothing | Revise prompt and retry; ghostwrite fallback after 3 attempts. Follow Step 6. |
 | Mangled tool name in output (e.g. `write_filecepte`) | Vibe produced a garbled tool call — write never executed | Same as WROTE_NOTHING — treat as failed write. Follow Step 6. |
 | `=== SYNTAX ERRORS ===` | Post-run syntax check failed | **Fix before committing** |
 | Same file read 5+ times | Vibe is looping — run likely lost | Abort, check diff, try again |
@@ -276,41 +277,40 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 - **Max 3 attempts** per sub-task before escalating to the user.
 - Between attempts, **read the git diff** to avoid doubling partial work.
 
-### WROTE_NOTHING / failed write — auto-retry then escalate
+### WROTE_NOTHING / failed write — auto-retry then ghostwrite (default)
 
 When a run produces any of the following:
 - No `[tool]  file:` lines (WROTE_NOTHING)
 - Mangled tool call output (e.g. `write_filecepte`, `search_replacecepte`)
 - Non-zero exit with 0 files changed
 
-**Do not write the code yourself.** Revise the prompt (simpler target, explicit file path, shorter scope) and re-run. This counts against the 3-attempt limit.
+First, **revise the prompt** (simpler target, explicit file path, shorter scope) and re-run. This counts against the 3-attempt limit.
 
-If all 3 attempts produce WROTE_NOTHING or failed writes, stop and ask the user:
+If all 3 attempts still produce WROTE_NOTHING or a failed write, **the default is to finish the task, not halt.** Claude writes the content itself (ghostwrite) — either delegating only the file-write step to Vibe or writing the file directly — then continues the chain. The task always completes; a stubborn Vibe never strands the run.
+
+**The Step 7 report must list ghostwritten files separately** from Vibe-authored files — never silently mix them:
 
 ```
-⛔ Vibe wrote nothing after 3 attempts — halting chain.
+Files ghostwritten (Claude-authored after 3 failed Vibe attempts):
+  - path/to/file.ext
+```
+
+### `--no-ghostwrite` — opt out of the ghostwrite fallback
+
+When the user passes `--no-ghostwrite` to `/vibe`, Claude must **not** ghostwrite. After 3 failed attempts, halt and ask instead:
+
+```
+⛔ Vibe wrote nothing after 3 attempts (--no-ghostwrite set).
   File expected : <path>
   Failure signal: <WROTE_NOTHING | mangled write | exit N, 0 files>
   Sub-task      : <description>
 
 Options:
   (r) Revise prompt manually and retry
-  (g) Allow ghostwriting for this sub-task (--allow-ghostwriting)
   (a) Abort
 ```
 
 Do not proceed to subsequent sub-tasks until resolved.
-
-### `--allow-ghostwriting` opt-in
-
-When the user passes `--allow-ghostwriting` to `/vibe`, Claude may write the content and delegate only the file-write step to Vibe. **The Step 7 report must then explicitly list ghostwritten files:**
-
-```
-Files ghostwritten (Claude-authored, Vibe wrote):
-  - path/to/file.ext
-```
-
-Ghostwritten files must be listed separately from Vibe-authored files. Do not silently mix them.
 
 ---
 
@@ -424,7 +424,7 @@ When `--with-review` is not used, all five fields are omitted (do not write them
 - **Decompose before delegating** — one task, one prompt.
 - **Streaming always** — never `--output text`.
 - **Check diff between sub-tasks** — never launch the next one blind.
-- **Never ghostwrite** — do not write code yourself and pass it to Vibe as content. On WROTE_NOTHING or failed write, follow the retry/escalation rules in Step 6. Only permitted with `--allow-ghostwriting`, which must be declared in the Step 7 report.
+- **Ghostwrite only as a last resort** — always delegate to Vibe first; never write code yourself before 3 failed attempts. After 3 failures the default is to ghostwrite and finish (declare it in the Step 7 report). `--no-ghostwrite` disables the fallback and halts instead. See Step 6.
 - **Max 12 turns per call** — decompose instead of extending.
 - **Grep target before delegating** — `grep -n "exact_target" file.py` before any `search_replace` prompt. Pass that anchor as `--require "exact_target"` so the delegate aborts before launching if it's gone. Always use grep for VERIFY, not file re-read.
 - **Match model to task** — inline-edit tasks → `deepseek-flash` or `mistral-medium-3.5`; never route edits to agent-mode `devstral-small` (read/explore only).
