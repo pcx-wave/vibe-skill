@@ -113,7 +113,7 @@ Run after finishing a task manually (after Vibe failures):
 python3 tools/log-manual.py
 ```
 
-Run from anywhere inside the project. Estimates: output tokens = lines_added × 10, input tokens = lines_added × 40. Flagged `cost_estimated: true` in the log.
+Run from the project root. Estimates: output tokens = lines_added × 10, input tokens = lines_added × 40. Flagged `cost_estimated: true` in the log.
 
 ### Script source
 

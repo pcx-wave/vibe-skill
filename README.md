@@ -186,6 +186,20 @@ In a Claude Code session:
 
 Claude decomposes the task, writes the Vibe prompt, supervises execution, and reports the diff.
 
+### Flags
+
+All optional — the no-flag path stays the default and lightest:
+
+```
+/vibe --with-review N <instruction>      — Claude reviews Vibe's diff and re-delegates fixes up to N times
+/vibe --verbose <instruction>            — print per-model token/cost breakdown when done
+/vibe --no-ghostwrite <instruction>      — halt on repeated Vibe write failures instead of finishing
+```
+
+- **`--with-review N`** — after Vibe finishes, Claude takes a reviewer pass over the changes and re-delegates a fix for each fundamental issue (logic/crash/contract/scope/security only — not style), up to N iterations. Trades Claude tokens for less manual review.
+- **`--verbose`** — prints the token/cost block per model: I/O with the coder model (e.g. Mistral), the total, and the projected Claude-token cost it spared.
+- **`--no-ghostwrite`** — by default, if Vibe writes nothing after 3 retries, Claude finishes the task itself (ghostwrite fallback) so the run never strands — ghostwritten files are reported separately. `--no-ghostwrite` disables that fallback: after 3 failed attempts Claude halts and asks you (retry / abort) instead.
+
 ### Model selection
 
 By default, Vibe uses whatever `active_model` is set in `~/.vibe/config.toml`. You can override it per-session without touching that file:
