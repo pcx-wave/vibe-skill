@@ -335,15 +335,18 @@ Claude Code
 
 ---
 
-## Sister project
+## Sister projects
 
-A parallel delegate using **Gemini CLI** is available at [pcx-wave/gemini-skill](https://github.com/pcx-wave/gemini-skill). Same orchestration pattern, same run log format — different model and trade-offs.
+Parallel delegates using the same orchestration pattern and run log format — different models and trade-offs:
+
+- [pcx-wave/gemini-skill](https://github.com/pcx-wave/gemini-skill) — delegate to **Gemini CLI**
+- [pcx-wave/opencode-skill](https://github.com/pcx-wave/opencode-skill) — delegate to **OpenCode CLI**
 
 ## Reporting
 
 Every run is logged to `~/.local/share/delegate-runs.jsonl` with tokens, cost, model, and failure details. Query it with `~/tools/delegate-report [--since N] [--project NAME] [--fails]` or from Claude Code: `/vibe-report [args]`.
 
-The log is shared with sister delegates (e.g. gemini-skill), so the report defaults to **vibe runs only**. Use `--all` for the cross-delegate comparison, or `--delegate NAME` to scope to another tool.
+The log is shared with sister delegates (gemini-skill, opencode-skill), so the report defaults to **vibe runs only**. Use `--all` for the cross-delegate comparison, or `--delegate NAME` to scope to another tool.
 
 ---
 
