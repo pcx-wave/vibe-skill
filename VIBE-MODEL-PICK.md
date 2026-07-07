@@ -4,7 +4,7 @@ description: Override the Vibe model for all subsequent delegations. Usage: /vib
 license: MIT
 user-invocable: true
 allowed-tools:
-  - bash
+  - Bash
 ---
 
 # /vibe-model-pick

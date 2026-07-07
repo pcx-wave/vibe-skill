@@ -4,7 +4,7 @@ description: Disable Vibe auto-delegate mode — coding tasks are handled by Cla
 license: MIT
 user-invocable: true
 allowed-tools:
-  - bash
+  - Bash
 ---
 
 # /vibeoff

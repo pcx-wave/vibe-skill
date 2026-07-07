@@ -4,7 +4,7 @@ description: Show Vibe auto-delegate mode status (ON/OFF) and active model overr
 license: MIT
 user-invocable: true
 allowed-tools:
-  - bash
+  - Bash
 ---
 
 # /vibestatus
