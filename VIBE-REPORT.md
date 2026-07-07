@@ -4,7 +4,7 @@ description: Show Vibe usage report — token/cost/failure stats. Usage: /vibe-r
 license: MIT
 user-invocable: true
 allowed-tools:
-  - bash
+  - Bash
 ---
 
 # /vibe-report

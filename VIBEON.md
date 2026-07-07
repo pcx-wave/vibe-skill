@@ -4,7 +4,7 @@ description: Enable Vibe auto-delegate mode — all coding tasks are automatical
 license: MIT
 user-invocable: true
 allowed-tools:
-  - bash
+  - Bash
 ---
 
 # /vibeon

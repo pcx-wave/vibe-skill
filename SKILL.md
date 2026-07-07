@@ -7,9 +7,9 @@ description: >
 license: MIT
 user-invocable: true
 allowed-tools:
-  - bash
-  - read_file
-  - grep
+  - Bash
+  - Read
+  - Grep
 ---
 
 # Vibe Orchestrator
@@ -27,7 +27,7 @@ Toggle auto-delegate mode — Vibe automatically handles coding tasks without re
 For `/vibestatus`, run both checks and print two lines:
 ```
 Auto-vibe: ON | OFF
-Model: <alias>  (override)  OR  Model: deepseek-flash  (config default)
+Model: <alias>  (override)  OR  Model: <default from ~/.vibe/config.toml>  (config default)
 ```
 
 ### Auto-mode pre-filter (when flag is set)
@@ -72,7 +72,9 @@ Override the Vibe model for all subsequent delegations without touching `~/.vibe
 | `/vibe-model-pick <alias>` | `echo <alias> > ~/.local/share/vibe-model.flag` → confirm |
 | `/vibe-model-clear` | `rm -f ~/.local/share/vibe-model.flag` → confirm "back to config default" |
 
-**Available aliases** (from `~/.vibe/config.toml`):
+**Aliases are machine-specific** — read the actual list (and the default) from
+`[[model]]` entries in `~/.vibe/config.toml` before suggesting one; never assume
+an alias from this table exists. Example snapshot from one machine:
 
 | Alias | Model | Provider | Notes |
 |-------|-------|----------|-------|

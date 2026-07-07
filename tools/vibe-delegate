@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# vibe-delegate — Lance Vibe en mode programmatique et capture le résultat
+# vibe-delegate — Launch Vibe programmatically and capture the result
 # Usage: vibe-delegate <workdir> <prompt> [max-turns] [agent] [timeout-secs]
 #
 # ROOT CAUSE FIX (2026-05-10):
@@ -236,18 +236,14 @@ VIBE_EXIT=${PIPESTATUS[0]}
 
 # ── Real Mistral token counts from session log ─────────────────────────────────
 VIBE_HOME="${VIBE_HOME:-$HOME/.vibe}"
-SESSION_LOG=$(ls -t "$VIBE_HOME/logs/session"/*/meta.json 2>/dev/null | head -1)
-# Guard against attributing a STALE session's tokens to this run. If vibe never
-# wrote its own meta.json (e.g. it died before starting a session), the most
-# recent file on disk is some earlier run's — happened on 2026-06-17 where a
-# failed code-reviewer run silently inherited the prior run's 363,506 tokens.
-if [ -n "$SESSION_LOG" ]; then
-  SESSION_LOG_MTIME=$(stat -c %Y "$SESSION_LOG" 2>/dev/null || echo 0)
-  START_SECS=$((START_NS / 1000000000))
-  if [ "$SESSION_LOG_MTIME" -lt "$START_SECS" ]; then
-    SESSION_LOG=""
-    echo "(no session log newer than run start — token count unknown, not reusing stale data)"
-  fi
+# Only consider meta.json files written AFTER this run started (mtime newer than
+# the pre-launch sentinel). Guards against inheriting a STALE session's tokens —
+# happened on 2026-06-17 where a failed code-reviewer run silently inherited the
+# prior run's 363,506 tokens — and narrows fan-out-vibe parallel cross-attribution
+# to genuinely overlapping sessions.
+SESSION_LOG=$(find "$VIBE_HOME/logs/session" -mindepth 2 -maxdepth 2 -name meta.json -newer "$SENTINEL" 2>/dev/null | xargs -r ls -t 2>/dev/null | head -1)
+if [ -z "$SESSION_LOG" ]; then
+  echo "(no session log newer than run start — token count unknown, not reusing stale data)"
 fi
 if [ -n "$SESSION_LOG" ]; then
   python3 -c "

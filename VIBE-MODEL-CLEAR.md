@@ -4,7 +4,7 @@ description: Clear the Vibe model override and revert to the config default.
 license: MIT
 user-invocable: true
 allowed-tools:
-  - bash
+  - Bash
 ---
 
 # /vibe-model-clear
