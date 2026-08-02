@@ -100,6 +100,8 @@ Hard constraints — not config options. Full details in `SKILL-reference.md`.
 - **Code duplication** → Vibe may re-insert a block already written. Grep for duplicate definitions after every run.
 - **HTML in prompt** → tags like `<div>` are shell redirects (exit 127). Write HTML content to a temp file; reference the path in the prompt.
 - **Source code in bash heredoc** → quotes/backslashes mangle. Use `search_replace` directly; never a helper script that replaces code.
+- **`read_file` caps at 50 KiB / 2000 lines** → a larger file comes back as `read_file failed: Output (N KiB) exceeds maximum allowed size`, and Vibe then re-reads it in slices, so it may reason about only *part* of the file without saying so. Keep any file you hand it (diffs, generated inputs) under 50 KiB — split by area rather than dumping one big diff.
+- **Files outside the workdir are unreadable** → `--trust` does NOT cover them. Any path outside `workdir` raises an `outside_directory` approval that is auto-denied headlessly: the run exits **0** with 0 tool calls and, before the 2026-08-02 parser fix, said nothing at all. **Any file the prompt points Vibe at must live inside the workdir.** Stage temp inputs in a gitignored dir in the repo, not `/tmp`.
 - **Orchestration chain** → 6 failure points in order: CLI auth → pseudo-TTY → stream parser → TOML pricing → git diff → JSON log. When a run produces unexpected results, work down this list. Full details in `SKILL-reference.md`.
 
 ---
@@ -200,12 +202,26 @@ VERIFY: grep for "def extract_labels" in app.py and confirm it exists.
 
 **Available agents:**
 
-| Agent | Use |
-|-------|-----|
-| *(default → `auto-approve`)* | General implementation — all tools run without approval |
-| `code-reviewer` | Review only, no changes |
-| `planner` | Planning before implementing |
-| `code-architect` | Architecture design, read-only |
+These are Vibe's **built-in** agents. Custom agents can add to this list, but
+nothing outside it is guaranteed to exist — an unknown name aborts the run in
+~1.5s with `Error: Agent 'X' not found`.
+
+| Agent | Type | Use |
+|-------|------|-----|
+| *(default → `auto-approve`)* | agent | General implementation — all tools run without approval |
+| `plan` | agent | **Read-only** — reviews, analysis, planning. The right pick for any "look, don't touch" task |
+| `default` | agent | Standard loop, prompts for approval (needs a TTY — avoid headless) |
+| `accept-edits` | agent | Auto-approves edits but not other tools |
+| `lean` | agent | Reduced tool surface |
+| `explore` | **subagent** | Read-only exploration — **cannot** be passed to `--agent`; usable only as a sub-agent from within a run |
+
+> ⚠️ `code-reviewer`, `planner`, and `code-architect` were listed here until
+> 2026-08-02 but **do not exist** in current Vibe. Use `plan` for review and
+> planning work. Verify against `BUILTIN_AGENTS` in
+> `vibe/core/agents/models.py` if a name is ever in doubt.
+
+**Read-only runs write nothing by design** — that is success, not `WROTE_NOTHING`.
+Do not apply the Step 6 retry/ghostwrite ladder to a `plan`/`explore` run.
 
 **Recommended max turns:**
 - Read/explore: `5`
@@ -254,9 +270,12 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 | Flag | Meaning | Action |
 |------|---------|--------|
 | `[WARN]` | Vibe encountered an error | Read the error, fix manually |
+| `[ERROR]` | Vibe refused to start (bad agent name, bad flag) — run died in ~1.5s | Fix the argument named in the message; do NOT retry verbatim |
+| `[DENIED]` | A tool call was auto-denied. Almost always a path **outside the workdir** | Move the file inside the workdir and re-run. `--trust` will not fix it |
+| `[APPROVAL]` | Vibe needed a permission it did not have | Same as `[DENIED]` — check the `outside workdir` label |
 | `[tool]  search_replace [FAIL]` | UTF-8 match failure | Edit manually with Python `str.replace()` |
 | `exit: 1` or non-zero | Vibe failed / did not complete verification | Read diff, correct prompt |
-| No `[tool]  file:` lines | `WROTE_NOTHING` — Vibe read but wrote nothing | Revise prompt and retry; ghostwrite fallback after 3 attempts. Follow Step 6. |
+| No `[tool]  file:` lines | `WROTE_NOTHING` — Vibe read but wrote nothing | Revise prompt and retry; ghostwrite fallback after 3 attempts. Follow Step 6. **Not applicable to `plan`/`explore`** — writing nothing is correct there. |
 | Mangled tool name in output (e.g. `write_filecepte`) | Vibe produced a garbled tool call — write never executed | Same as WROTE_NOTHING — treat as failed write. Follow Step 6. |
 | `=== SYNTAX ERRORS ===` | Post-run syntax check failed | **Fix before committing** |
 | Same file read 5+ times | Vibe is looping — run likely lost | Abort, check diff, try again |
@@ -269,8 +288,14 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 | Truncated prompt | Special chars in inline prompt | Script uses temp file — should be fixed |
 | Wrote a Python helper just to replace code | Misdiagnosed search_replace limit | Use search_replace directly for ASCII code; write_file only if new content is too long for the prompt |
 | Empty run — 0 files changed despite ≥3 tool calls | Multi-edit prompt: first `search_replace` target not found byte-for-byte | Split into sequential single-change runs; grep target string locally before delegating |
+| `Tool calls: 0` on a run that clearly did work; no `[vibe]` answer line | **Fixed 2026-08-02.** The stream parser only understood the legacy `role`-keyed schema; current Vibe emits tool calls as `type: effect` and message content as a **list** of blocks. `content.lower()` on that list threw `AttributeError`, killing the parser and discarding the whole run output | Already patched. If it reappears, the run output is still recoverable from `~/.vibe/logs/session/<newest>/messages.jsonl` — nothing is lost, only unprinted |
 
 **If exit non-zero:** do not relaunch immediately. Read the diff, understand what was done, fix the prompt.
+
+**If output looks empty or truncated, the run is not lost.** Every session is
+journalled to `~/.vibe/logs/session/session_<ts>_<id>/messages.jsonl`. The final
+assistant message is the last entry with `role == 'assistant'`; note its
+`content` may be a string *or* a list of `{'type': 'text', 'text': ...}` blocks.
 
 ---
 
