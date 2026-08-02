@@ -145,7 +145,9 @@ trap 'rm -f "$VIBE_SCRIPT" "$PROMPT_FILE" "$DELEGATE_STATS_FILE" "$SENTINEL"' EX
   echo '#!/usr/bin/env bash'
   echo "PROMPT_CONTENT=$(printf '%q' "$(cat "$PROMPT_FILE")")"
   # auto-approve is required for non-interactive tool execution (file writes, python3, etc.)
-  # Explicit --agent overrides this; named agents like code-reviewer don't need it.
+  # Explicit --agent overrides this. Valid primary agents (vibe 2026-08):
+  #   default | chat | plan | accept-edits | auto-approve | lean
+  # 'explore' exists but is a SUBAGENT — --agent rejects it outright.
   _VIBE_AGENT="${AGENT:-auto-approve}"
   printf 'exec vibe --agent %q -p "$PROMPT_CONTENT" --trust --max-turns %q --output streaming --workdir %q\n' \
     "$_VIBE_AGENT" "$MAX_TURNS" "$WORKDIR"
@@ -163,10 +165,31 @@ tools_called = 0
 warn_count = 0
 sr_fails = 0
 sandbox_blocked = False
+denied_count = 0
 writes = []
 def clean(line):
     line = line.replace('\r', '')
     return ANSI_RE.sub('', line).strip()
+
+def as_text(content):
+    # Vibe emits message content EITHER as a plain string (session-log /
+    # legacy schema) OR as a list of content blocks (current --output
+    # streaming schema: [{'type': 'text', 'text': ...}]). Calling .lower()
+    # straight on the list crashed the whole parser and threw away the run
+    # output, so normalise to str once, here, before anything touches it.
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for blk in content:
+            if isinstance(blk, dict):
+                parts.append(blk.get('text') or blk.get('content') or '')
+            elif isinstance(blk, str):
+                parts.append(blk)
+        return chr(10).join(p for p in parts if p)
+    if content is None:
+        return ''
+    return str(content)
 
 for raw in sys.stdin:
     line = clean(raw)
@@ -175,16 +198,82 @@ for raw in sys.stdin:
     try:
         msg = json.loads(line)
     except json.JSONDecodeError:
+        # vibe reports startup failures as PLAIN TEXT on stdout, not JSON —
+        # e.g. 'Error: Agent X not found' or 'Agent X is a subagent and cannot
+        # be used as the primary agent'. Silently swallowing every non-JSON
+        # line meant those surfaced only as exit 1 after 1.5s with no reason.
+        low = line.lower()
+        if low.startswith('error') or 'not found' in low or 'cannot be used' in low or 'usage:' in low:
+            warn_count += 1
+            print(f'  [ERROR] {line[:200]}', flush=True)
         continue
 
     role    = msg.get('role', '')
-    content = msg.get('content', '') or ''
+    content = as_text(msg.get('content', ''))
+    etype   = msg.get('type', '')
 
     if role in ('system', 'user'):
         continue
 
     if 'not permitted' in content.lower():
         sandbox_blocked = True
+
+    # ── streaming schema: tool calls arrive as 'effect', not role='tool' ──
+    # Without this the run reports 'Tool calls: 0' even when the agent read
+    # and wrote files, which then mislabels a fine run as WROTE_NOTHING.
+    if etype == 'effect':
+        detail = msg.get('detail') or {}
+        tool_name = (detail.get('toolName') or msg.get('title') or '')
+        kind = detail.get('kind') or ''
+        tinput = detail.get('input') or {}
+        filepath = tinput.get('filePath') or tinput.get('file_path') or ''
+        state = msg.get('state') or {}
+        status = state.get('status') or ''
+        disp = state.get('display') or {}
+        tools_called += 1
+        if status == 'cancelled':
+            # A denied approval lands here. Silent in the old parser: the run
+            # exited 0 having done nothing, with no hint why.
+            denied_count += 1
+            sandbox_blocked = True
+            reason = disp.get('message') or state.get('reason') or 'denied'
+            print(f'  [DENIED] {tool_name} {filepath} - {reason}', flush=True)
+        elif kind in ('file_write', 'file_edit') or 'write' in tool_name.lower() or 'edit' in tool_name.lower():
+            if filepath:
+                writes.append(filepath)
+            if 'search_replace' in tool_name.lower():
+                ok = disp.get('success', True)
+                if not ok:
+                    sr_fails += 1
+                sr_status = 'OK' if ok else 'FAIL'
+                print(f'  [tool]  search_replace [{sr_status}] {filepath}', flush=True)
+            else:
+                print(f'  [tool]  file: {filepath or tool_name}', flush=True)
+        elif kind == 'file_read' or 'read' in tool_name.lower():
+            print(f'  [read]  {filepath or tool_name}', flush=True)
+        else:
+            summary = (disp.get('message') or (detail.get('display') or {}).get('summary') or '')
+            print(f'  [tool]  {tool_name}: {summary[:100]}', flush=True)
+        if disp.get('success') is False and status != 'cancelled':
+            warn_count += 1
+            # Print it — a counted-but-invisible warn is useless. The common
+            # one is 'Output (N KiB) exceeds maximum allowed size (50.0 KiB)',
+            # which means the agent silently saw only PART of the file.
+            failmsg = disp.get('message') or state.get('reason') or ''
+            if failmsg:
+                print(f'  [WARN]  {tool_name}: {failmsg[:160]}', flush=True)
+        continue
+
+    # Approval prompts that need a human: also invisible before.
+    if etype == 'callback' and (msg.get('detail') or {}).get('kind') == 'approval':
+        perms = (msg.get('detail') or {}).get('requiredPermissions') or []
+        labels = ', '.join(p.get('label', '') for p in perms if isinstance(p, dict))
+        cb_title = msg.get('title', '') or ''
+        print(f'  [APPROVAL] {cb_title} {labels}', flush=True)
+        continue
+
+    if etype == 'reasoning':
+        continue
 
     if role == 'assistant':
         text = content.strip()
@@ -221,14 +310,19 @@ for raw in sys.stdin:
             snippet = (first_line or content)[:100]
             print(f'  [tool]  {snippet}', flush=True)
 
-print(f'Tool calls: {tools_called}  |  warns: {warn_count}  |  sr_fails: {sr_fails}')
+_denied_note = f'  |  DENIED: {denied_count}' if denied_count else ''
+print(f'Tool calls: {tools_called}  |  warns: {warn_count}  |  sr_fails: {sr_fails}{_denied_note}')
+if denied_count:
+    print('  ^ tool calls were DENIED (approval refused). Common cause: a path')
+    print('    outside the workdir — --trust does not cover those. Move the file')
+    print('    inside the workdir, or pass --add-dir, and re-run.')
 
 # Write partial stats so the token block can merge into it.
 _sf = os.environ.get('DELEGATE_STATS_FILE', '')
 if _sf:
     try:
         with open(_sf, 'w') as _f:
-            json.dump({'tool_calls': tools_called, 'warn_count': warn_count, 'search_replace_fails': sr_fails, 'sandbox_blocked': sandbox_blocked}, _f)
+            json.dump({'tool_calls': tools_called, 'warn_count': warn_count, 'search_replace_fails': sr_fails, 'sandbox_blocked': sandbox_blocked, 'denied_count': denied_count}, _f)
     except Exception:
         pass
 "
@@ -537,7 +631,13 @@ entry['cost_claude_eq'] = round((ti * 3.0 + to * 15.0) / 1_000_000, 6)
 # timeout / exit_error / syntax_error / sr_fail — other failure modes
 # warn_only     — completed with non-fatal warnings
 # ok            — clean run
-_readonly_agents = ('code-reviewer', 'code-architect', 'planner')
+# Agents that legitimately produce no file writes, so "wrote nothing" is the
+# expected outcome and not a failure. 'plan' / 'explore' / 'chat' are the
+# current Vibe built-ins; the first three names are kept for older installs
+# where they existed as custom agents (a name that is simply absent here just
+# means a read-only run gets flagged wrote_nothing, which is what happened to
+# every `plan` review before 2026-08-02).
+_readonly_agents = ('plan', 'explore', 'chat', 'code-reviewer', 'code-architect', 'planner')
 _tok_out  = entry.get('tokens_out', 0) or 0
 _tc       = entry.get('tool_calls', 0) or 0
 _fc       = entry.get('files_changed', 0) or 0
