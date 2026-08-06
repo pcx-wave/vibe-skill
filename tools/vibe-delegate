@@ -146,7 +146,7 @@ trap 'rm -f "$VIBE_SCRIPT" "$PROMPT_FILE" "$DELEGATE_STATS_FILE" "$SENTINEL"' EX
   echo "PROMPT_CONTENT=$(printf '%q' "$(cat "$PROMPT_FILE")")"
   # auto-approve is required for non-interactive tool execution (file writes, python3, etc.)
   # Explicit --agent overrides this. Valid primary agents (vibe 2026-08):
-  #   default | chat | plan | accept-edits | auto-approve | lean
+  #   default | plan | accept-edits | auto-approve | lean
   # 'explore' exists but is a SUBAGENT — --agent rejects it outright.
   _VIBE_AGENT="${AGENT:-auto-approve}"
   printf 'exec vibe --agent %q -p "$PROMPT_CONTENT" --trust --max-turns %q --output streaming --workdir %q\n' \
@@ -161,6 +161,8 @@ timeout "$TIMEOUT_SECS" "${SCRIPT_CMD[@]}" | python3 -c "
 import sys, json, re, os
 
 ANSI_RE = re.compile(r'\x1b\[[0-9;]*[mABCDEFGHJKSTfhilmnprsu]|\x1b\([AB]|\x0f|\x0e')
+# Everything unprintable except tab / newline / CR.
+CTRL_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
 tools_called = 0
 warn_count = 0
 sr_fails = 0
@@ -170,6 +172,17 @@ writes = []
 def clean(line):
     line = line.replace('\r', '')
     return ANSI_RE.sub('', line).strip()
+
+def safe(s):
+    # clean() only strips escapes from the RAW stdin line. An ESC written as
+    # an escaped-unicode literal (backslash-u-001b) inside a JSON string value
+    # arrives here escape-free, so clean() sees nothing to strip; json.loads
+    # then decodes it back into a real ESC, which reaches stdout when printed.
+    # A tool name, path or denial reason can therefore repaint the terminal
+    # (erase-line, cursor-up) and forge output. That matters twice over: this
+    # text is read by a terminal AND fed back to the orchestrating model.
+    # So strip at every print of a decoded value, not just on the raw line.
+    return CTRL_RE.sub('', ANSI_RE.sub('', str(s)))
 
 def as_text(content):
     # Vibe emits message content EITHER as a plain string (session-log /
@@ -205,7 +218,7 @@ for raw in sys.stdin:
         low = line.lower()
         if low.startswith('error') or 'not found' in low or 'cannot be used' in low or 'usage:' in low:
             warn_count += 1
-            print(f'  [ERROR] {line[:200]}', flush=True)
+            print(f'  [ERROR] {safe(line)[:200]}', flush=True)
         continue
 
     role    = msg.get('role', '')
@@ -223,20 +236,24 @@ for raw in sys.stdin:
     # and wrote files, which then mislabels a fine run as WROTE_NOTHING.
     if etype == 'effect':
         detail = msg.get('detail') or {}
-        tool_name = (detail.get('toolName') or msg.get('title') or '')
+        tool_name = safe(detail.get('toolName') or msg.get('title') or '')
         kind = detail.get('kind') or ''
         tinput = detail.get('input') or {}
-        filepath = tinput.get('filePath') or tinput.get('file_path') or ''
+        filepath = safe(tinput.get('filePath') or tinput.get('file_path') or '')
         state = msg.get('state') or {}
         status = state.get('status') or ''
         disp = state.get('display') or {}
         tools_called += 1
-        if status == 'cancelled':
+        if status in ('cancelled', 'skipped'):
             # A denied approval lands here. Silent in the old parser: the run
             # exited 0 having done nothing, with no hint why.
+            # 'skipped' matters too: project_effect_state tests event.cancelled
+            # first and event.skipped second, so a denial carrying a custom
+            # decision.feedback — and every pre-tool hook denial — arrives as
+            # SkippedEffectState and was being printed as a plain [WARN].
             denied_count += 1
             sandbox_blocked = True
-            reason = disp.get('message') or state.get('reason') or 'denied'
+            reason = safe(disp.get('message') or state.get('reason') or 'denied')
             print(f'  [DENIED] {tool_name} {filepath} - {reason}', flush=True)
         elif kind in ('file_write', 'file_edit') or 'write' in tool_name.lower() or 'edit' in tool_name.lower():
             if filepath:
@@ -252,14 +269,14 @@ for raw in sys.stdin:
         elif kind == 'file_read' or 'read' in tool_name.lower():
             print(f'  [read]  {filepath or tool_name}', flush=True)
         else:
-            summary = (disp.get('message') or (detail.get('display') or {}).get('summary') or '')
+            summary = safe(disp.get('message') or (detail.get('display') or {}).get('summary') or '')
             print(f'  [tool]  {tool_name}: {summary[:100]}', flush=True)
-        if disp.get('success') is False and status != 'cancelled':
+        if disp.get('success') is False and status not in ('cancelled', 'skipped'):
             warn_count += 1
             # Print it — a counted-but-invisible warn is useless. The common
             # one is 'Output (N KiB) exceeds maximum allowed size (50.0 KiB)',
             # which means the agent silently saw only PART of the file.
-            failmsg = disp.get('message') or state.get('reason') or ''
+            failmsg = safe(disp.get('message') or state.get('reason') or '')
             if failmsg:
                 print(f'  [WARN]  {tool_name}: {failmsg[:160]}', flush=True)
         continue
@@ -267,8 +284,8 @@ for raw in sys.stdin:
     # Approval prompts that need a human: also invisible before.
     if etype == 'callback' and (msg.get('detail') or {}).get('kind') == 'approval':
         perms = (msg.get('detail') or {}).get('requiredPermissions') or []
-        labels = ', '.join(p.get('label', '') for p in perms if isinstance(p, dict))
-        cb_title = msg.get('title', '') or ''
+        labels = ', '.join(safe(p.get('label', '')) for p in perms if isinstance(p, dict))
+        cb_title = safe(msg.get('title', '') or '')
         print(f'  [APPROVAL] {cb_title} {labels}', flush=True)
         continue
 
@@ -276,19 +293,20 @@ for raw in sys.stdin:
         continue
 
     if role == 'assistant':
-        text = content.strip()
+        # Escapes stripped, text kept — legitimate output must survive intact.
+        text = safe(content).strip()
         if not text:
             continue
         print(f'  [vibe] {text[:400]}', flush=True)
 
     elif role == 'tool':
         tools_called += 1
-        first_line = content.split('\n')[0] if content else ''
-        tool_name  = msg.get('tool', '') or msg.get('name', '')
+        first_line = safe(content.split('\n')[0]) if content else ''
+        tool_name  = safe(msg.get('tool', '') or msg.get('name', ''))
 
         # Detect writes to track files for syntax check
         if 'write' in tool_name.lower() or 'edit' in tool_name.lower():
-            filepath = msg.get('path') or msg.get('file_path') or ''
+            filepath = safe(msg.get('path') or msg.get('file_path') or '')
             if filepath:
                 writes.append(filepath)
             print(f'  [tool]  file: {filepath or first_line[:80]}', flush=True)
@@ -307,7 +325,7 @@ for raw in sys.stdin:
         elif 'command' in tool_name.lower():
             print(f'  [tool]  command: {first_line[:100]}', flush=True)
         else:
-            snippet = (first_line or content)[:100]
+            snippet = safe(first_line or content)[:100]
             print(f'  [tool]  {snippet}', flush=True)
 
 _denied_note = f'  |  DENIED: {denied_count}' if denied_count else ''
@@ -315,7 +333,7 @@ print(f'Tool calls: {tools_called}  |  warns: {warn_count}  |  sr_fails: {sr_fai
 if denied_count:
     print('  ^ tool calls were DENIED (approval refused). Common cause: a path')
     print('    outside the workdir — --trust does not cover those. Move the file')
-    print('    inside the workdir, or pass --add-dir, and re-run.')
+    print('    inside the workdir and re-run.')
 
 # Write partial stats so the token block can merge into it.
 _sf = os.environ.get('DELEGATE_STATS_FILE', '')
@@ -632,12 +650,14 @@ entry['cost_claude_eq'] = round((ti * 3.0 + to * 15.0) / 1_000_000, 6)
 # warn_only     — completed with non-fatal warnings
 # ok            — clean run
 # Agents that legitimately produce no file writes, so "wrote nothing" is the
-# expected outcome and not a failure. 'plan' / 'explore' / 'chat' are the
-# current Vibe built-ins; the first three names are kept for older installs
-# where they existed as custom agents (a name that is simply absent here just
-# means a read-only run gets flagged wrote_nothing, which is what happened to
-# every `plan` review before 2026-08-02).
-_readonly_agents = ('plan', 'explore', 'chat', 'code-reviewer', 'code-architect', 'planner')
+# expected outcome and not a failure. 'plan' / 'explore' are the current Vibe
+# built-ins; the last three names are kept for older installs where they
+# existed as custom agents (a name that is simply absent here just means a
+# read-only run gets flagged wrote_nothing, which is what happened to every
+# `plan` review before 2026-08-02). 'chat' is deliberately NOT here: it is
+# absent from BUILTIN_AGENTS in 2.22.0 and dropped from the enum in 2.24.0,
+# so --agent chat never reaches this code at all.
+_readonly_agents = ('plan', 'explore', 'code-reviewer', 'code-architect', 'planner')
 _tok_out  = entry.get('tokens_out', 0) or 0
 _tc       = entry.get('tool_calls', 0) or 0
 _fc       = entry.get('files_changed', 0) or 0
@@ -658,6 +678,12 @@ elif entry.get('syntax_errors', 0) > 0:
     _reason = 'syntax_error'
 elif entry.get('search_replace_fails', 0) > 0:
     _reason = 'sr_fail'
+elif stats.get('denied_count') and _fc == 0:
+    # Denials were counted but never classified: a fully-denied run wrote no
+    # files, so it fell through to wrote_nothing/silent_exit and triggered the
+    # retry-then-ghostwrite ladder — retrying a run the sandbox will deny again.
+    # Deliberately NOT added to the wrote_nothing tuple below.
+    _reason = 'denied'
 elif _tc == 0 and _fc == 0 and _agent not in _readonly_agents:
     # Zero tool calls always means nothing was written, regardless of how much text
     # came back. Previously this only fired when tok_out was ALSO 0, which is exactly
