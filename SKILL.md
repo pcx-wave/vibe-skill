@@ -275,8 +275,8 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 | `[APPROVAL]` | Vibe needed a permission it did not have | Same as `[DENIED]` — check the `outside workdir` label |
 | `[tool]  search_replace [FAIL]` | UTF-8 match failure | Edit manually with Python `str.replace()` |
 | `exit: 1` or non-zero | Vibe failed / did not complete verification | Read diff, correct prompt |
-| No `[tool]  file:` lines | `WROTE_NOTHING` — Vibe read but wrote nothing | Revise prompt and retry; ghostwrite fallback after 3 attempts. Follow Step 6. **Not applicable to `plan`/`explore`** — writing nothing is correct there. |
-| Mangled tool name in output (e.g. `write_filecepte`) | Vibe produced a garbled tool call — write never executed | Same as WROTE_NOTHING — treat as failed write. Follow Step 6. |
+| No `[tool]  file:` lines, or `0 files changed` | Looks like `WROTE_NOTHING` — **but this is stdout, not proof.** The harness only prints what its stream parser recognized; it does not print what Vibe actually submitted to `write_file`. Do the journal check below before treating this as a failure. | See **mandatory pre-check** below. Only once that check comes back genuinely empty: revise prompt and retry; ghostwrite fallback after 3 attempts. Follow Step 6. **Not applicable to `plan`/`explore`** — writing nothing is correct there. |
+| Mangled tool name in output (e.g. `write_filecepte`) | Vibe produced a garbled tool call — write never executed | Same journal check as above before assuming the content is gone. |
 | `=== SYNTAX ERRORS ===` | Post-run syntax check failed | **Fix before committing** |
 | Same file read 5+ times | Vibe is looping — run likely lost | Abort, check diff, try again |
 
@@ -292,10 +292,46 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 
 **If exit non-zero:** do not relaunch immediately. Read the diff, understand what was done, fix the prompt.
 
-**If output looks empty or truncated, the run is not lost.** Every session is
-journalled to `~/.vibe/logs/session/session_<ts>_<id>/messages.jsonl`. The final
-assistant message is the last entry with `role == 'assistant'`; note its
-`content` may be a string *or* a list of `{'type': 'text', 'text': ...}` blocks.
+**Mandatory pre-check before declaring WROTE_NOTHING.** stdout is a filtered
+stream, not a record of what Vibe did — the parser can drop or mislabel a
+write it doesn't recognize the shape of. The session journal is not filtered:
+`~/.vibe/logs/session/session_<ts>_<id>/messages.jsonl` records the exact
+arguments of every `write_file`/`search_replace` call, whether or not the
+write later succeeded. vibe-delegate already runs this check for you — when
+the filesystem shows 0 changed files, it scans the journal for the *newest*
+session and prints an `[RECOVERY]` block listing every write attempt found,
+with char counts, before the syntax-check section. **Read that block before
+concluding the run failed.** A run that "wrote nothing" per stdout but shows
+a few-KB `write_file` in `[RECOVERY]` did not fail — the content exists and
+is very likely usable; treat it as a formatting/parsing problem, not an empty
+run, and inspect the content in the journal directly:
+
+```bash
+JOURNAL=$(ls -t ~/.vibe/logs/session/*/messages.jsonl | head -1)   # or the [RECOVERY] path printed
+python3 -c "
+import json
+for line in open('$JOURNAL'):
+    m = json.loads(line)
+    if m.get('role') != 'assistant': continue
+    for tc in (m.get('tool_calls') or []):
+        fn = tc.get('function') or {}
+        if 'write' in fn.get('name',''):
+            print(json.loads(fn['arguments'])['content'])
+"
+```
+
+Confirmed case (2026-08-11, this repo): stdout showed `0 files changed` and a
+turn-limit stop on a `temperature.py` delegation. The journal held a complete,
+correct 5,706-char module from the *first* `write_file` call — Vibe had simply
+wrapped it as `{"module_docstring": """...."""}\n<real source>` instead of
+emitting raw source, the write step rejected the shape, and Vibe burned the
+rest of the turn budget on write→rm→write instead of on the actual task.
+Stripping the one-line JSON envelope recovered the module outright — no
+retry needed. The retry that *was* run cost ~180k tokens for a result no
+better than turn 1's output already sitting in the journal.
+
+If, after reading the journal, there is genuinely no `write_file`/`edit` call
+for the target file at all — that's the real WROTE_NOTHING, and Step 6 applies.
 
 ---
 

@@ -469,6 +469,69 @@ fi
 # the file was tracked, untracked, already dirty, or this is a non-git directory.
 CHANGED=$(find . -type f -newer "$SENTINEL" -not -path './.git/*' 2>/dev/null | sed 's|^\./||')
 
+# ── Recovery scan — only when the filesystem shows nothing changed ────────────
+# "0 files changed" on stdout is not proof Vibe wrote nothing: the session
+# journal (messages.jsonl) records every write_file call regardless of whether
+# the write later succeeded, got wrapped in an unexpected envelope, or was
+# undone by a subsequent rm. Confirmed case (2026-08-11): stdout showed 0 files
+# changed and a turn-limit stop; the journal held a complete, correct 5,706-char
+# module from the FIRST write_file call, lost because it was wrapped as
+# {"module_docstring": """...."""} and the write step rejected the shape.
+#
+# This applies the last attempt per file_path directly to disk — no attempt to
+# guess intent beyond that, no revert-tracking. The syntax check right below
+# already validates whatever lands here (refresh $CHANGED after, same as any
+# other write), so a bad recovery shows up as syntax_error, not silently as ok.
+# If content lands wrong for some other project, that's the same outcome as
+# today (wrote_nothing/exit_error) — this can only improve on that baseline.
+if [ -z "$(printf '%s' "$CHANGED" | tr -d '[:space:]')" ] && [ -n "$SESSION_LOG" ]; then
+  JOURNAL="$(dirname "$SESSION_LOG")/messages.jsonl"
+  if [ -f "$JOURNAL" ]; then
+    python3 - "$JOURNAL" << 'PYRECOVER'
+import json, sys
+
+journal = sys.argv[1]
+by_path = {}  # last attempt per path wins
+with open(journal, errors='replace') as fh:
+    for line in fh:
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        if msg.get('role') != 'assistant':
+            continue
+        for tc in (msg.get('tool_calls') or []):
+            fn = tc.get('function') or {}
+            name = str(fn.get('name', ''))
+            if 'write' not in name and 'edit' not in name and 'replace' not in name:
+                continue
+            try:
+                args = json.loads(fn.get('arguments') or '{}')
+            except ValueError:
+                continue
+            body = args.get('content') or args.get('new_string') or ''
+            path = args.get('file_path', '')
+            if body and path:
+                by_path[path] = (name, body)
+
+if by_path:
+    print(f'  [RECOVERY] stdout said 0 files changed, but the session journal has '
+          f'{len(by_path)} write attempt(s) — applying the last attempt per file:')
+    for path, (name, body) in by_path.items():
+        try:
+            with open(path, 'w') as f:
+                f.write(body)
+            print(f'    [applied] {name} -> {path}  ({len(body)} chars)')
+        except OSError as e:
+            print(f'    [FAILED to apply] {name} -> {path}: {e}')
+    print(f'  [RECOVERY] full journal: {journal}')
+    print(f'  [RECOVERY] syntax-checking recovered file(s) below, same as any other write.')
+PYRECOVER
+    # Refresh CHANGED so the syntax check (right below) picks up recovered files.
+    CHANGED=$(find . -type f -newer "$SENTINEL" -not -path './.git/*' 2>/dev/null | sed 's|^\./||')
+  fi
+fi
+
 SYNTAX_COUNT_FILE=$(mktemp /tmp/vibe-syntax-count-XXXXXX.txt)
 echo 0 > "$SYNTAX_COUNT_FILE"
 export DELEGATE_CHANGED="$CHANGED"
