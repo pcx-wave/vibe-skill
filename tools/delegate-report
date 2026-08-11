@@ -2,7 +2,8 @@
 """delegate-report — Token, cost, and failure report for delegate runs.
 
 Usage:
-  delegate-report [--since DAYS] [--project NAME] [--fails]
+  delegate-report [--since DAYS] [--project NAME] [--fails] [--adapt]
+                   [--all] [--delegate NAME] [--self-improve]
 """
 
 import json, sys, argparse
@@ -241,6 +242,10 @@ FAIL_INFO = {
                       'A wasted run was avoided; grep the anchor locally, fix prompt or workdir'),
     'precheck':      ('Required --require anchor missing — run never launched',
                       'A wasted run was avoided; grep the anchor locally, fix prompt or workdir'),
+    'denied':        ('Tool calls denied by sandbox/approval — 0 files written',
+                      'Check the path is inside workdir; --trust does not cover paths outside it'),
+    'narrated_no_tools': ('Model described the edit in text instead of calling write/edit tools',
+                      'Rephrase prompt as an explicit imperative tool-use instruction, or switch model'),
 }
 
 # Canonical failure type names (new format) → display codes (backwards compat)
@@ -364,6 +369,121 @@ def show_fails_by_model(fails):
     print()
 
 
+# ── Self-improvement scan ───────────────────────────────────────────────────
+# Pure counting, no LLM judgment: flags recurring/rising failure_reason
+# patterns for a delegation model so a human (or a follow-up Claude session)
+# can turn them into a targeted recommendation. Never writes to SKILL.md —
+# that merge is deliberately left as a reviewed, manual step. See
+# docs/error-reduction.md for the discipline this mirrors (don't act on
+# <5% classes; require enough samples to trust a rate).
+
+SELF_IMPROVE_MIN_SAMPLE = 10     # min runs in window before trusting a rate
+SELF_IMPROVE_MIN_RATE   = 0.10   # 10% minimum failure rate to flag at all
+SELF_IMPROVE_RISE_DELTA = 0.05   # must rise 5pp past last-flagged rate to re-flag
+SELF_IMPROVE_WINDOW_DAYS = 14    # default window when --since isn't given
+NON_FAILURE_REASONS = {None, '', 'ok', 'sandbox_blocked_ok'}
+
+
+def self_improve_state_path(delegate):
+    return Path.home() / '.local' / 'share' / f'{delegate or "all"}-self-improve-state.json'
+
+
+def load_self_improve_state(delegate):
+    p = self_improve_state_path(delegate)
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return {}
+
+
+def save_self_improve_state(delegate, state):
+    p = self_improve_state_path(delegate)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(state, indent=2, sort_keys=True))
+
+
+def show_self_improve(runs, delegate, window_days):
+    delegate_runs = [r for r in runs if not is_manual(r)]
+    total = len(delegate_runs)
+
+    print(f"\n{'=' * 56}")
+    print(f"  SELF-IMPROVE SCAN  (delegate: {delegate or 'all'}, window: {window_days}d)")
+    print(f"{'=' * 56}")
+
+    if total < SELF_IMPROVE_MIN_SAMPLE:
+        print(f"  Runs: {total}  —  below the {SELF_IMPROVE_MIN_SAMPLE}-run minimum sample size.")
+        print(f"  Skipping: a rate computed on this few runs is noise, not signal.")
+        print()
+        return
+
+    counts = defaultdict(int)
+    examples = defaultdict(list)
+    for r in delegate_runs:
+        fr = r.get('failure_reason')
+        if fr in NON_FAILURE_REASONS:
+            fr = classify_fail(r)  # legacy fallback for pre-failure_reason log entries
+        if not fr or fr in NON_FAILURE_REASONS:
+            continue
+        counts[fr] += 1
+        if len(examples[fr]) < 3:
+            # No project name here — this scan's output is meant to be safe to
+            # paste into a committed doc (docs/self-improvement-log.md, SKILL.md).
+            # For the actual project name, run `delegate-report --fails --project X`
+            # locally — that output stays in your terminal, never in this repo.
+            examples[fr].append((r.get('ts', '?')[:10], r.get('model', '?')))
+
+    if not counts:
+        print(f"  Runs: {total}  —  no failures in window. Nothing to flag.")
+        print()
+        return
+
+    state = load_self_improve_state(delegate)
+    candidates = []
+    for fr, n in counts.items():
+        rate = n / total
+        if rate < SELF_IMPROVE_MIN_RATE:
+            continue
+        prior = state.get(fr)
+        if prior is None:
+            status = 'NEW'
+        elif rate >= prior.get('rate', 0) + SELF_IMPROVE_RISE_DELTA:
+            status = f"RISING ({prior['rate']*100:.0f}% -> {rate*100:.0f}%)"
+        else:
+            continue  # already flagged before, not worsening — don't re-flag
+        candidates.append((fr, n, rate, status))
+
+    if not candidates:
+        print(f"  Runs: {total}  —  no new or rising pattern above {SELF_IMPROVE_MIN_RATE*100:.0f}%.")
+        print(f"  (Existing patterns already acknowledged — see {self_improve_state_path(delegate)})")
+        print()
+        return
+
+    print(f"  Runs: {total}  —  {len(candidates)} candidate(s) for a recommendation:\n")
+    for fr, n, rate, status in sorted(candidates, key=lambda x: -x[2]):
+        info = FAIL_INFO.get(fr, ('Unknown issue', 'Check run output manually'))
+        print(f"  [{status}] {fr} — {n}/{total} runs ({rate*100:.0f}%)")
+        print(f"      cause : {info[0]}")
+        print(f"      fix   : {info[1]}")
+        print(f"      seen:")
+        for ts, model in examples[fr]:
+            print(f"        {ts}  ({model})")
+        print()
+        state[fr] = {
+            'rate': round(rate, 4),
+            'ts': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'window_runs': total,
+        }
+
+    save_self_improve_state(delegate, state)
+    print(f"  State saved to {self_improve_state_path(delegate)}")
+    print(f"  Next step (manual, not automated by this tool): read the evidence runs above,")
+    print(f"  draft a dated entry in docs/self-improvement-log.md, then propose a SKILL.md")
+    print(f"  diff for review. This tool never edits SKILL.md itself.")
+    print()
+
+
 def show_fails(runs, limit=20, include_warns=False, benchmark=False):
     fails = [r for r in runs if is_notable(r, include_warns)]
     if not fails:
@@ -414,6 +534,9 @@ def main():
     ap.add_argument('--adapt', action='store_true', help='Show failure rates by prompt adaptation')
     ap.add_argument('--all', action='store_true', help='Include all delegates, not just vibe')
     ap.add_argument('--delegate', metavar='NAME', help='Filter to a specific delegate (e.g. vibe, opencode, gemini)')
+    ap.add_argument('--self-improve', action='store_true',
+                     help='Scan for new/rising failure_reason patterns for this delegate '
+                          '(pure detection — never edits SKILL.md itself)')
     args = ap.parse_args()
 
     if args.all:
@@ -422,6 +545,15 @@ def main():
         delegate, scope = args.delegate, f'{args.delegate} only'
     else:
         delegate, scope = 'vibe', 'vibe only'
+
+    if args.self_improve:
+        window_days = args.since or SELF_IMPROVE_WINDOW_DAYS
+        runs = load_runs(window_days, args.project, delegate)
+        if not runs:
+            print(f"No runs found (scope: {scope}, window: {window_days}d).")
+            return
+        show_self_improve(runs, delegate, window_days)
+        return
 
     runs = load_runs(args.since, args.project, delegate)
     if not runs:
