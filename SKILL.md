@@ -265,6 +265,14 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 
 **Vibe never commits.** All changes are left unstaged — `git checkout .` reverts everything if needed.
 
+**Verdict lines (since 2026-09-30) — read these before anything else:**
+
+- Last line is `=== RESULT: OK ... ===` or `=== RESULT: FAILED [reason] ... ===` (or `READ-ONLY`). `FAILED` means nothing usable landed, whatever stdout narrated: never report success, run `git diff`.
+- Exit code **3** = vibe exited 0 but the run failed (`wrote_nothing`, `write_mismatch`, `syntax_error`, `sr_fail`, ...). A `vibe-delegate ... && next` chain now stops there.
+- `=== WRITE AUDIT (journal vs disk) ===` lists every write Vibe journaled and whether the file really changed. `MISMATCH` = journaled write did not land; `0 write attempts` = Vibe only explored (turn cap, or file too large).
+- `[PREFLIGHT] large file(s)` = a file named in the prompt is >40 KB; the harness already appended a "no explore, one search_replace" instruction. For such files still prefer a single exact-anchor edit with `--require`.
+- Sessions live in `~/.vibe/logs/session/unified/<uuid>/{journal,chunks}` (compact JSON; tool `file_system.search_replace`, input `{file_path, content:[{old_str,new_str}]}`). Token counts are not in that layout's `meta.json`, so `0 tokens` is expected.
+
 **Red flags to act on immediately:**
 
 | Flag | Meaning | Action |
@@ -307,7 +315,7 @@ is very likely usable; treat it as a formatting/parsing problem, not an empty
 run, and inspect the content in the journal directly:
 
 ```bash
-JOURNAL=$(ls -t ~/.vibe/logs/session/*/messages.jsonl | head -1)   # or the [RECOVERY] path printed
+JOURNAL=$(ls -t ~/.vibe/logs/session/*/messages.jsonl 2>/dev/null | head -1)   # legacy layout only; for unified sessions read WRITE AUDIT
 python3 -c "
 import json
 for line in open('$JOURNAL'):
