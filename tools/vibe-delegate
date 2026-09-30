@@ -640,7 +640,8 @@ if [ -n "$SESSION_LOG" ] && [ -d "$(dirname "$SESSION_LOG")/journal" ]; then
 import glob, hashlib, json, os, sys
 
 sess = sys.argv[1]
-changed = {p.strip() for p in os.environ.get("CHANGED_LIST", "").split() if p.strip()}
+changed = {p.strip() for p in os.environ.get("CHANGED_LIST", "").split()
+           if p.strip() and "__pycache__" not in p and not p.endswith(".pyc")}
 seen, attempts = set(), []
 
 def rel(path):
@@ -654,11 +655,13 @@ def walk(o):
         if isinstance(inp, dict) and (tn.endswith("search_replace") or tn.endswith("write_file")):
             c = inp.get("content")
             body = json.dumps(c, sort_keys=True) if not isinstance(c, str) else c
-            key = (tn, inp.get("file_path"), hashlib.sha1(body.encode()).hexdigest())
+            # search_replace journals the target as file_path, write_file as path.
+            target = inp.get("file_path") or inp.get("path")
+            key = (tn, target, hashlib.sha1(body.encode()).hexdigest())
             if key not in seen:
                 seen.add(key)
                 size = len(c) if isinstance(c, str) else sum(len(e.get("new_str", "")) for e in (c or []) if isinstance(e, dict))
-                attempts.append((tn.split(".")[-1], rel(inp.get("file_path")), size))
+                attempts.append((tn.split(".")[-1], rel(target), size))
         for v in o.values():
             walk(v)
     elif isinstance(o, list):
