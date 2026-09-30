@@ -108,6 +108,25 @@ START_NS=$(date +%s%N)
 PROMPT_WORDS=$(printf '%s' "$PROMPT" | wc -w | tr -d ' ')
 GIT_BEFORE=$(git rev-parse HEAD 2>/dev/null || echo "no-git")
 
+# Big-file guard (2026-09-30). Vibe's read_file caps at ~50 KiB and returns the
+# file TRUNCATED; on a large target it then burns its whole turn budget on
+# grep/sed exploration and writes nothing (app/__init__.py, 2 of 3 runs). Any
+# existing file named in the prompt above 40 KB gets a standing instruction so
+# this no longer depends on the caller remembering it.
+BIG_LIST=""
+for _f in $(printf '%s' "$PROMPT" | grep -oE '[A-Za-z0-9_./-]+\.(py|js|html|json|md|sh|css|ya?ml|toml|txt)' | sort -u); do
+  if [ -f "$_f" ] && [ "$(stat -c %s "$_f" 2>/dev/null || echo 0)" -gt 40000 ]; then
+    BIG_LIST="$BIG_LIST $_f($(( $(stat -c %s "$_f") / 1024 ))KB)"
+  fi
+done
+if [ -n "$BIG_LIST" ]; then
+  echo "[PREFLIGHT] large file(s) above Vibe's read cap:$BIG_LIST — injecting no-explore / single-search_replace instruction" >&2
+  PROMPT="$PROMPT
+
+HARNESS NOTE: these files are too large for read_file (it returns them truncated):$BIG_LIST. Do NOT read them whole and do NOT explore. Locate the anchor with grep -n, then make each change with ONE search_replace call using the exact anchor. Write your change in your first 2-3 tool calls."
+fi
+AUDIT_RC=0
+
 # Sentinel file for mtime-based change detection. `git diff --name-only` is binary
 # (modified-vs-not), so it misses a re-edit to a file that was ALREADY dirty before
 # this run started — exactly what happens with sequential same-file delegations,
@@ -139,7 +158,11 @@ DELEGATE_STATS_FILE=$(mktemp /tmp/delegate-stats-XXXXXX.json)
 printf '{}' > "$DELEGATE_STATS_FILE"
 export DELEGATE_STATS_FILE
 
-trap 'rm -f "$VIBE_SCRIPT" "$PROMPT_FILE" "$DELEGATE_STATS_FILE" "$SENTINEL"' EXIT
+# Final failure_reason handoff (PYLOG -> bash) so the script can exit non-zero.
+DELEGATE_REASON_FILE=$(mktemp /tmp/delegate-reason-XXXXXX.txt)
+export DELEGATE_REASON_FILE
+
+trap 'rm -f "$VIBE_SCRIPT" "$PROMPT_FILE" "$DELEGATE_STATS_FILE" "$DELEGATE_REASON_FILE" "$SENTINEL"' EXIT
 
 {
   echo '#!/usr/bin/env bash'
@@ -353,7 +376,10 @@ VIBE_HOME="${VIBE_HOME:-$HOME/.vibe}"
 # happened on 2026-06-17 where a failed code-reviewer run silently inherited the
 # prior run's 363,506 tokens — and narrows fan-out-vibe parallel cross-attribution
 # to genuinely overlapping sessions.
-SESSION_LOG=$(find "$VIBE_HOME/logs/session" -mindepth 2 -maxdepth 2 -name meta.json -newer "$SENTINEL" 2>/dev/null | xargs -r ls -t 2>/dev/null | head -1)
+# maxdepth 3: legacy layout is session_*/meta.json (depth 2); since ~2026-09 Vibe
+# writes unified/<uuid>/meta.json (depth 3). With depth 2 only, every run was
+# blind ("no session log", no journal recovery, no write audit).
+SESSION_LOG=$(find "$VIBE_HOME/logs/session" -mindepth 2 -maxdepth 3 -name meta.json -newer "$SENTINEL" 2>/dev/null | xargs -r ls -t 2>/dev/null | head -1)
 if [ -z "$SESSION_LOG" ]; then
   echo "(no session log newer than run start — token count unknown, not reusing stale data)"
 fi
@@ -363,7 +389,7 @@ import json, sys, os
 try:
     with open('$SESSION_LOG') as f:
         data = json.load(f)
-    stats = data.get('stats', {})
+    stats = data.get('stats') or {}  # unified meta.json carries no token stats
     prompt = stats.get('last_turn_prompt_tokens', 0)
     completion = stats.get('last_turn_completion_tokens', 0)
     total = stats.get('last_turn_total_tokens', prompt + completion)
@@ -372,7 +398,7 @@ try:
     # Exact cumulative in/out for the whole run — preferred over the last-turn ratio.
     session_in  = stats.get('session_prompt_tokens', 0)
     session_out = stats.get('session_completion_tokens', 0)
-    model_name = data.get('config', {}).get('active_model', 'unknown')
+    model_name = (data.get('config') or {}).get('active_model', 'unknown')  # unified meta.json has "config": null
 
     # Read per-model pricing from ~/.vibe/config.toml (fallback: Mistral Medium 3.5 rates)
     input_price, output_price = 1.5, 7.5
@@ -604,6 +630,69 @@ rm -f "$SYNTAX_COUNT_FILE"
 # ── Git summary ────────────────────────────────────────────────────────────────
 GIT_AFTER=$(git rev-parse HEAD 2>/dev/null || echo "no-git")
 
+# ── Write audit: what Vibe journaled vs what actually changed on disk ─────────
+# stdout is a filtered stream; the session journal is the ground truth of every
+# write attempt. Unified layout: <session>/{journal/*.jsonl,chunks/*.json} with
+# tool calls named file_system.search_replace / file_system.write_file
+# (input: {file_path, content:[{old_str,new_str}]} or {file_path, content:str}).
+if [ -n "$SESSION_LOG" ] && [ -d "$(dirname "$SESSION_LOG")/journal" ]; then
+  CHANGED_LIST="$CHANGED" python3 - "$(dirname "$SESSION_LOG")" << 'PYAUDIT' || AUDIT_RC=$?
+import glob, hashlib, json, os, sys
+
+sess = sys.argv[1]
+changed = {p.strip() for p in os.environ.get("CHANGED_LIST", "").split() if p.strip()}
+seen, attempts = set(), []
+
+def rel(path):
+    path = path or ""
+    return os.path.relpath(path) if os.path.isabs(path) else path
+
+def walk(o):
+    if isinstance(o, dict):
+        tn = o.get("toolName") or ""
+        inp = o.get("input")
+        if isinstance(inp, dict) and (tn.endswith("search_replace") or tn.endswith("write_file")):
+            c = inp.get("content")
+            body = json.dumps(c, sort_keys=True) if not isinstance(c, str) else c
+            key = (tn, inp.get("file_path"), hashlib.sha1(body.encode()).hexdigest())
+            if key not in seen:
+                seen.add(key)
+                size = len(c) if isinstance(c, str) else sum(len(e.get("new_str", "")) for e in (c or []) if isinstance(e, dict))
+                attempts.append((tn.split(".")[-1], rel(inp.get("file_path")), size))
+        for v in o.values():
+            walk(v)
+    elif isinstance(o, list):
+        for v in o:
+            walk(v)
+
+for f in sorted(glob.glob(sess + "/journal/*.jsonl")):
+    for line in open(f, errors="replace"):
+        try:
+            walk(json.loads(line))
+        except ValueError:
+            pass
+for f in sorted(glob.glob(sess + "/chunks/*.json")):
+    try:
+        walk(json.load(open(f, errors="replace")))
+    except (ValueError, OSError):
+        pass
+
+print("")
+print("=== WRITE AUDIT (journal vs disk) ===")
+if not attempts:
+    print("  journal: 0 write attempts (Vibe only read/explored — check turn cap and file size)")
+for tool, path, size in attempts:
+    state = "on disk: CHANGED" if path in changed else "on disk: UNCHANGED  <-- MISMATCH"
+    print(f"  {tool:<14} {path}  (+{size} chars)  {state}")
+journaled = {p for _, p, _ in attempts}
+for p in sorted(changed - journaled):
+    print(f"  [WARN] {p} changed on disk but no journaled write (edited via bash/other?)")
+# exit 9 = a journaled write did not land on disk (surfaced as RESULT: FAILED)
+sys.exit(9 if any(p not in changed for _, p, _ in attempts) else 0)
+PYAUDIT
+  if [ "${AUDIT_RC:-0}" = "9" ]; then export DELEGATE_AUDIT_MISMATCH=1; fi
+fi
+
 if [ "$GIT_BEFORE" != "$GIT_AFTER" ]; then
   echo ""
   echo "=== COMMITS CREATED ==="
@@ -755,8 +844,14 @@ elif _tc == 0 and _fc == 0 and _agent not in _readonly_agents:
     _reason = 'narrated_no_tools' if _tok_out > 0 else 'silent_exit'
 elif _tok_out < 50 and _fc == 0 and _tc < 3 and _agent not in _readonly_agents:
     _reason = 'near_empty'
-elif _fc == 0 and _tc >= 3 and _exit == 0 and _agent not in _readonly_agents:
+elif _fc == 0 and _exit == 0 and _agent not in _readonly_agents:
+    # No `_tc >= 3` floor (removed 2026-09-30): a write-capable run that changed
+    # no file is never "ok", whether it made 1 tool call or 8. With the floor, a
+    # 1-2 call run with prose output fell through to 'ok'.
     _reason = 'wrote_nothing'
+elif os.environ.get('DELEGATE_AUDIT_MISMATCH') and _agent not in _readonly_agents:
+    # A write the journal recorded never reached disk (see WRITE AUDIT above).
+    _reason = 'write_mismatch'
 elif entry.get('warn_count', 0) > 0:
     _reason = 'warn_only'
 else:
@@ -775,6 +870,40 @@ saved_str = f', saved ~${saved:.4f} vs Claude' if saved > 0 else ''
 adapt_str = f'  [{",".join(adaptations)}]' if adaptations else ''
 reason_str = f'  {_reason}' if _reason != 'ok' else ''
 print(f'[log] → {LOG}  ({tok} tokens, exit {_exit}, {duration}s{saved_str}{reason_str}{adapt_str})')
+
+# Loud, last-line verdict. failure_reason used to be a single word at the end of
+# the [log] line, with exit code 0 — easy to read past. Callers (and Claude) must
+# treat FAILED as "nothing usable landed", whatever stdout narrated.
+_FAIL_HINTS = {
+    'wrote_nothing':     'Vibe read/explored but never wrote (turn cap hit? large file? see WRITE AUDIT)',
+    'silent_exit':       'Vibe never engaged (0 tokens, 0 tool calls)',
+    'near_empty':        'Vibe produced almost nothing',
+    'narrated_no_tools': 'Vibe described the change instead of calling a write tool',
+    'denied':            'a tool call was auto-denied (path outside workdir?)',
+    'write_mismatch':    'a write Vibe journaled did NOT land on disk (see WRITE AUDIT)',
+    'syntax_error':      'files written but syntax check failed',
+    'sr_fail':           'search_replace did not match (anchor/UTF-8?)',
+    'exit_error':        'vibe exited non-zero',
+    'timeout':           'wall-clock timeout',
+}
+if _reason in _FAIL_HINTS:
+    print(f'=== RESULT: FAILED [{_reason}] — {_FAIL_HINTS[_reason]}. Do NOT report success; inspect git diff. ===')
+elif _agent in _readonly_agents:
+    print('=== RESULT: READ-ONLY run (no writes expected) ===')
+else:
+    print(f'=== RESULT: OK — {_fc} file(s) changed, verified against the session journal ===')
+try:
+    with open(os.environ['DELEGATE_REASON_FILE'], 'w') as _rf:
+        _rf.write(_reason)
+except (KeyError, OSError):
+    pass
 PYLOG
 
+# Exit 3 = vibe itself exited 0 but produced nothing usable (see RESULT line).
+# Keeps `vibe-delegate ... && next-step` chains from sailing past a failed run.
+FINAL_REASON=$(cat "$DELEGATE_REASON_FILE" 2>/dev/null)
+case "$FINAL_REASON" in
+  wrote_nothing|silent_exit|near_empty|narrated_no_tools|denied|write_mismatch|syntax_error|sr_fail)
+    if [ "$VIBE_EXIT" -eq 0 ]; then exit 3; fi ;;
+esac
 exit $VIBE_EXIT
