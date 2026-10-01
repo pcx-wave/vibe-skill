@@ -246,6 +246,14 @@ FAIL_INFO = {
                       'Check the path is inside workdir; --trust does not cover paths outside it'),
     'narrated_no_tools': ('Model described the edit in text instead of calling write/edit tools',
                       'Rephrase prompt as an explicit imperative tool-use instruction, or switch model'),
+    'turn_cap':      ('Hit --max-turns before finishing — task likely partial (silent exit 0)',
+                      'Check git diff for missing parts; split the task or raise max-turns (cap 12)'),
+    'write_mismatch':('A write Vibe journaled did NOT land on disk',
+                      'Read the WRITE AUDIT block; re-apply the journaled edit or re-run'),
+    'exit_error':    ('Vibe exited non-zero — usually the --max-turns cap was hit mid-task',
+                      'Read git diff for partial work; split the task or raise max-turns (cap 12)'),
+    'exit_err':      ('Vibe exited non-zero — usually the --max-turns cap was hit mid-task',
+                      'Read git diff for partial work; split the task or raise max-turns (cap 12)'),
 }
 
 # Canonical failure type names (new format) → display codes (backwards compat)
