@@ -48,7 +48,7 @@ AGENT="${4:-}"
 TIMEOUT_SECS="${5:-180}"
 
 # Hard ceiling: SKILL.md has documented "never exceed 12 turns, decompose instead"
-# since 2026-05, but nothing enforced it — the seo-monitor session (2026-06-17) ran
+# since 2026-05, but nothing enforced it — one observed session (2026-06-17) ran
 # a 4-file refactor at max-turns=12 that still only got 2/4 files done for 334k tokens.
 # Decomposition was the documented fix; this makes it impossible to skip by accident.
 if [ "$MAX_TURNS" -gt 12 ] 2>/dev/null; then
@@ -120,11 +120,21 @@ for _f in $(printf '%s' "$PROMPT" | grep -oE '[A-Za-z0-9_./-]+\.(py|js|html|json
   fi
 done
 if [ -n "$BIG_LIST" ]; then
-  echo "[PREFLIGHT] large file(s) above Vibe's read cap:$BIG_LIST — injecting no-explore / single-search_replace instruction" >&2
+  echo "[PREFLIGHT] large file(s) over one read_file window (50 KiB):$BIG_LIST — injecting grep/offset instruction" >&2
+  # Measured 2026-10-01 (docs/harness-audit-2026-10-01.md H8): read_file returns
+  # the first 51,200 bytes with was_truncated=true; offset/limit page the rest.
+  # Vibe's system prompt forbids editing an unread file, so point it at a
+  # targeted read instead of forbidding reads.
   PROMPT="$PROMPT
 
-HARNESS NOTE: these files are too large for read_file (it returns them truncated):$BIG_LIST. Do NOT read them whole and do NOT explore. Locate the anchor with grep -n, then make each change with ONE search_replace call using the exact anchor. Write your change in your first 2-3 tool calls."
+HARNESS NOTE: these files are larger than one read_file window (50 KiB):$BIG_LIST. Do not read them from the top. Find the line with grep -n, read only that region with read_file offset/limit, then change it with the edit tool using the exact text you just read."
 fi
+# The model is never told its --max-turns budget (H10); without it a capped run
+# just stops mid-task with exit 0 (H2). Name the edit tool by its model-facing
+# name: asking for "search_replace" made Vibe spend turns on search_tool_functions (H4).
+PROMPT="$PROMPT
+
+RUN BUDGET: you have $MAX_TURNS turns in total. For in-place changes use the edit tool (to batch many similar edits in one turn you may call tools.file_system.edit from run_typescript). Keep your last turn for a short final summary of what you changed."
 AUDIT_RC=0
 
 # Sentinel file for mtime-based change detection. `git diff --name-only` is binary
@@ -172,8 +182,15 @@ trap 'rm -f "$VIBE_SCRIPT" "$PROMPT_FILE" "$DELEGATE_STATS_FILE" "$DELEGATE_REAS
   #   default | plan | accept-edits | auto-approve | lean
   # 'explore' exists but is a SUBAGENT — --agent rejects it outright.
   _VIBE_AGENT="${AGENT:-auto-approve}"
-  printf 'exec vibe --agent %q -p "$PROMPT_CONTENT" --trust --max-turns %q --output streaming --workdir %q\n' \
-    "$_VIBE_AGENT" "$MAX_TURNS" "$WORKDIR"
+  # VIBE_HARNESS=legacy|unified forces a backend; unset = Vibe's own rollout
+  # choice (GrowthBook rollout; unified for enrolled installs).
+  case "${VIBE_HARNESS:-}" in
+    legacy)  _HARNESS_FLAG="--legacy-harness" ;;
+    unified) _HARNESS_FLAG="--experimental-harness" ;;
+    *)       _HARNESS_FLAG="" ;;
+  esac
+  printf 'exec vibe %s --agent %q -p "$PROMPT_CONTENT" --trust --max-turns %q --output streaming --workdir %q\n' \
+    "$_HARNESS_FLAG" "$_VIBE_AGENT" "$MAX_TURNS" "$WORKDIR"
 } > "$VIBE_SCRIPT"
 chmod +x "$VIBE_SCRIPT"
 
@@ -262,7 +279,8 @@ for raw in sys.stdin:
         tool_name = safe(detail.get('toolName') or msg.get('title') or '')
         kind = detail.get('kind') or ''
         tinput = detail.get('input') or {}
-        filepath = safe(tinput.get('filePath') or tinput.get('file_path') or '')
+        # read_file / write_file carry the target as 'path' (H7).
+        filepath = safe(tinput.get('filePath') or tinput.get('file_path') or tinput.get('path') or '')
         state = msg.get('state') or {}
         status = state.get('status') or ''
         disp = state.get('display') or {}
@@ -399,7 +417,35 @@ try:
     session_in  = stats.get('session_prompt_tokens', 0)
     session_out = stats.get('session_completion_tokens', 0)
     model_name = (data.get('config') or {}).get('active_model', 'unknown')  # unified meta.json has "config": null
-
+    turn_cap_hit = False
+    if session_in == 0 and session_out == 0 and session_total == 0:
+        try:
+            sess_dir = os.path.dirname('$SESSION_LOG')
+            with open(os.path.join(sess_dir, 'CURRENT')) as f:
+                current_data = json.load(f)
+            generation = current_data.get('generation', '')
+            gen_dir = os.path.join(sess_dir, 'generations', generation)
+            with open(os.path.join(gen_dir, 'projection-state.json')) as f:
+                proj_data = json.load(f)
+            usage = proj_data.get('snapshot', {}).get('session', {}).get('tokenUsage', {})
+            session_in = usage.get('inputTokens', 0)
+            session_out = usage.get('outputTokens', 0)
+            with open(os.path.join(gen_dir, 'runtime-state.json')) as f:
+                runtime_data = json.load(f)
+            if runtime_data.get('session_metadata', {}).get('active_model'):
+                model_name = runtime_data['session_metadata']['active_model']
+            # --max-turns exhaustion is silent in Vibe 2.25 (exit 0, turn status
+            # completed); the only trace is a final turn with no text output.
+            # Verified 2026-10-01: max-turns 2 on a 6-file task, 1 file done.
+            with open(os.path.join(gen_dir, 'checkpoint.json')) as f:
+                outcome = (json.load(f).get('turn') or {}).get('outcome') or {}
+            # Require BOTH: no final text AND model calls == the cap, so an empty
+            # answer for any other reason is not mislabelled.
+            completions = sum(1 for a in runtime_data.get('actions') or [] if a.get('kind') == 'completion')
+            turn_cap_hit = (outcome.get('type') == 'completed' and not outcome.get('output')
+                            and completions >= int('$MAX_TURNS' or 0) > 0)
+        except Exception:
+            pass
     # Read per-model pricing from ~/.vibe/config.toml (fallback: Mistral Medium 3.5 rates)
     input_price, output_price = 1.5, 7.5
     try:
@@ -474,12 +520,34 @@ try:
             'tokens_total': run_total,
             'cost_usd':     round(run_cost, 6),
             'model':        model_name,
+            'turn_cap_hit': turn_cap_hit,
         })
         with open(sf, 'w') as wf:
             json.dump(existing, wf)
 except Exception as e:
     print(f'(token read failed: {e})')
 " 2>/dev/null
+fi
+
+# Full final answer (H6). The stream parser cuts every [vibe] line at 400 chars,
+# so the supervisor never saw Vibe's own summary; the checkpoint has it whole.
+if [ -n "$SESSION_LOG" ]; then
+  python3 - "$(dirname "$SESSION_LOG")" << 'PYANSWER'
+import json, re, sys
+sess = sys.argv[1]
+try:
+    gen = json.load(open(sess + "/CURRENT"))["generation"]
+    out = (json.load(open(f"{sess}/generations/{gen}/checkpoint.json")).get("turn") or {}).get("outcome") or {}
+    text = "\n".join(b.get("text", "") for b in out.get("output") or [] if isinstance(b, dict)).strip()
+except (OSError, ValueError, KeyError):
+    sys.exit(0)  # legacy layout: the [vibe] lines are all there is
+# Same control-char stripping as the stream parser: this text reaches a terminal
+# and the orchestrating model.
+text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+print("")
+print("=== VIBE FINAL ANSWER (full, from session checkpoint) ===")
+print(text if text else "(none — Vibe ended without a final message; see turn_cap)")
+PYANSWER
 fi
 
 echo ""
@@ -680,18 +748,64 @@ for f in sorted(glob.glob(sess + "/chunks/*.json")):
     except (ValueError, OSError):
         pass
 
+# Per-call outcome from the unified runtime state (H5/H9, docs/harness-audit-2026-10-01.md).
+# The journal walk above sees every attempt but not whether it succeeded, so a
+# failed edit next to a successful one on the same file was shown as CHANGED.
+calls = []  # (tool, path, succeeded, error message)
+try:
+    gen = json.load(open(sess + "/CURRENT"))["generation"]
+    rt = json.load(open(f"{sess}/generations/{gen}/runtime-state.json"))
+    for a in rt.get("actions") or []:
+        call = (a.get("request") or {}).get("call") or {}
+        name = call.get("name") or ""
+        if not (name.endswith("search_replace") or name.endswith("write_file")):
+            continue
+        args = call.get("arguments") or {}
+        err = (((a.get("result") or {}).get("result") or {}).get("error") or {}).get("message", "")
+        calls.append((name.split(".")[-1], rel(args.get("file_path") or args.get("path")),
+                      a.get("state") == "succeeded", err))
+except (OSError, ValueError, KeyError):
+    pass
+
 print("")
 print("=== WRITE AUDIT (journal vs disk) ===")
-if not attempts:
-    print("  journal: 0 write attempts (Vibe only read/explored — check turn cap and file size)")
-for tool, path, size in attempts:
-    state = "on disk: CHANGED" if path in changed else "on disk: UNCHANGED  <-- MISMATCH"
-    print(f"  {tool:<14} {path}  (+{size} chars)  {state}")
-journaled = {p for _, p, _ in attempts}
-for p in sorted(changed - journaled):
-    print(f"  [WARN] {p} changed on disk but no journaled write (edited via bash/other?)")
-# exit 9 = a journaled write did not land on disk (surfaced as RESULT: FAILED)
-sys.exit(9 if any(p not in changed for _, p, _ in attempts) else 0)
+mismatch = False
+unrecovered = 0
+if calls:
+    for tool, path, ok, err in calls:
+        disk = "CHANGED" if path in changed else "UNCHANGED"
+        call_state = "ok" if ok else f"FAILED ({err[:90]})"
+        flag = "  <-- MISMATCH" if ok and path not in changed else ""
+        mismatch = mismatch or bool(flag)
+        print(f"  {tool:<14} {path}  call: {call_state}  disk: {disk}{flag}")
+    ok_paths = {p for _, p, ok, _ in calls if ok}
+    failed_paths = {p for _, p, ok, _ in calls if not ok}
+    unrecovered = len(failed_paths - ok_paths)
+    if failed_paths and not unrecovered:
+        print("  (every failed edit was followed by a successful one on the same file — recovered)")
+    tracked = {p for _, p, _, _ in calls}
+else:
+    if not attempts:
+        print("  journal: 0 write attempts (Vibe only read/explored — check turn cap and file size)")
+    for tool, path, size in attempts:
+        state = "on disk: CHANGED" if path in changed else "on disk: UNCHANGED  <-- MISMATCH"
+        mismatch = mismatch or path not in changed
+        print(f"  {tool:<14} {path}  (+{size} chars)  {state}")
+    tracked = {p for _, p, _ in attempts}
+for p in sorted(changed - tracked):
+    # Unified harness: writes made from inside run_typescript or bash are not
+    # file_system.* actions, so they only show up here.
+    print(f"  [WARN] {p} changed on disk but no journaled write (edited via bash/run_typescript?)")
+sf = os.environ.get("DELEGATE_STATS_FILE", "")
+if sf and calls:
+    try:
+        st = json.load(open(sf))
+        st["sr_unrecovered"] = unrecovered
+        json.dump(st, open(sf, "w"))
+    except (OSError, ValueError):
+        pass
+# exit 9 = a successful/journaled write did not land on disk (surfaced as RESULT: FAILED)
+sys.exit(9 if mismatch else 0)
 PYAUDIT
   if [ "${AUDIT_RC:-0}" = "9" ]; then export DELEGATE_AUDIT_MISMATCH=1; fi
 fi
@@ -831,7 +945,9 @@ elif _exit not in (0, 124):
         _reason = 'exit_error'
 elif entry.get('syntax_errors', 0) > 0:
     _reason = 'syntax_error'
-elif entry.get('search_replace_fails', 0) > 0:
+elif stats.get('sr_unrecovered', entry.get('search_replace_fails', 0)) > 0:
+    # Only an edit failure with no later successful edit on the same file counts
+    # (H5). A recovered failure falls through to warn_only.
     _reason = 'sr_fail'
 elif stats.get('denied_count') and _fc == 0:
     # Denials were counted but never classified: a fully-denied run wrote no
@@ -843,7 +959,7 @@ elif _tc == 0 and _fc == 0 and _agent not in _readonly_agents:
     # Zero tool calls always means nothing was written, regardless of how much text
     # came back. Previously this only fired when tok_out was ALSO 0, which is exactly
     # how the mistral-medium "narrate the file instead of calling write_file" failure
-    # (seo-monitor, 2026-06-17 13:03:42 — tc=0, fc=0, but tok_out large) got logged as 'ok'.
+    # (observed 2026-06-17 — tc=0, fc=0, but tok_out large) got logged as 'ok'.
     _reason = 'narrated_no_tools' if _tok_out > 0 else 'silent_exit'
 elif _tok_out < 50 and _fc == 0 and _tc < 3 and _agent not in _readonly_agents:
     _reason = 'near_empty'
@@ -855,6 +971,10 @@ elif _fc == 0 and _exit == 0 and _agent not in _readonly_agents:
 elif os.environ.get('DELEGATE_AUDIT_MISMATCH') and _agent not in _readonly_agents:
     # A write the journal recorded never reached disk (see WRITE AUDIT above).
     _reason = 'write_mismatch'
+elif stats.get('turn_cap_hit') and _agent not in _readonly_agents:
+    # Files changed, but Vibe ran out of turns before its final answer: the
+    # task is likely PARTIAL. Before this check such runs were logged as 'ok'.
+    _reason = 'turn_cap'
 elif entry.get('warn_count', 0) > 0:
     _reason = 'warn_only'
 else:
@@ -887,6 +1007,7 @@ _FAIL_HINTS = {
     'syntax_error':      'files written but syntax check failed',
     'sr_fail':           'search_replace did not match (anchor/UTF-8?)',
     'exit_error':        'vibe exited non-zero',
+    'turn_cap':          'max-turns cap hit before Vibe finished — task likely PARTIAL; check git diff for what is missing',
     'timeout':           'wall-clock timeout',
 }
 if _reason in _FAIL_HINTS:
@@ -906,7 +1027,7 @@ PYLOG
 # Keeps `vibe-delegate ... && next-step` chains from sailing past a failed run.
 FINAL_REASON=$(cat "$DELEGATE_REASON_FILE" 2>/dev/null)
 case "$FINAL_REASON" in
-  wrote_nothing|silent_exit|near_empty|narrated_no_tools|denied|write_mismatch|syntax_error|sr_fail)
+  wrote_nothing|silent_exit|near_empty|narrated_no_tools|denied|write_mismatch|syntax_error|sr_fail|turn_cap)
     if [ "$VIBE_EXIT" -eq 0 ]; then exit 3; fi ;;
 esac
 exit $VIBE_EXIT

@@ -100,7 +100,11 @@ Hard constraints — not config options. Full details in `SKILL-reference.md`.
 - **Code duplication** → Vibe may re-insert a block already written. Grep for duplicate definitions after every run.
 - **HTML in prompt** → tags like `<div>` are shell redirects (exit 127). Write HTML content to a temp file; reference the path in the prompt.
 - **Source code in bash heredoc** → quotes/backslashes mangle. Use `search_replace` directly; never a helper script that replaces code.
-- **`read_file` caps at 50 KiB / 2000 lines** → a larger file comes back as `read_file failed: Output (N KiB) exceeds maximum allowed size`, and Vibe then re-reads it in slices, so it may reason about only *part* of the file without saying so. Keep any file you hand it (diffs, generated inputs) under 50 KiB — split by area rather than dumping one big diff.
+- **Large files are NOT a blocker** (measured 2026-10-01, `docs/harness-audit-2026-10-01.md` H8). One `read_file` call returns the first 51,200 bytes with `was_truncated: true` and the real `file_size_bytes`; `offset`/`limit` page the rest, `grep -n` finds anchors. Never tell the user "Vibe can't read files over 50 KB". The real risk is Vibe reasoning on the first window only, so for big files the harness injects a grep → read offset/limit → edit instruction. Handing it a big *diff to understand* is still a bad idea: split by area.
+- **Calling `vibe -p` directly hangs** without a TTY (it waits for stdin EOF; no session is even created). Always go through `vibe-delegate` (pty), or add `< /dev/null`.
+- **Tool names differ by view.** The model sees `edit` (`old_string`/`new_string`); the runtime and the stream log `file_system.search_replace`. In prompts say **"the edit tool"** — asking for "search_replace" makes Vibe waste turns on `search_tool_functions`.
+- **A turn = one model call, not one tool call.** Vibe can issue several independent tool calls per turn (6 reads + 6 edits took 5 turns). For repetitive edits across many files, ask for **one `run_typescript` call that loops with `tools.file_system.edit`** (verified 2026-10-01: 6 files in one call, 4 turns, ~18 % fewer tokens; each edit is still journaled as `search_replace`, so the WRITE AUDIT stays exact). Otherwise ask for parallel independent calls. Never forbid other tools in the same prompt — a "use the edit tool" line was enough to stop Vibe from batching.
+- **Never trust Vibe's description of itself** — check the session store (H11).
 - **Files outside the workdir are unreadable** → `--trust` does NOT cover them. Any path outside `workdir` raises an `outside_directory` approval that is auto-denied headlessly: the run exits **0** with 0 tool calls and, before the 2026-08-02 parser fix, said nothing at all. **Any file the prompt points Vibe at must live inside the workdir.** Stage temp inputs in a gitignored dir in the repo, not `/tmp`.
 - **Orchestration chain** → 6 failure points in order: CLI auth → pseudo-TTY → stream parser → TOML pricing → git diff → JSON log. When a run produces unexpected results, work down this list. Full details in `SKILL-reference.md`.
 
@@ -269,9 +273,13 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 
 - Last line is `=== RESULT: OK ... ===` or `=== RESULT: FAILED [reason] ... ===` (or `READ-ONLY`). `FAILED` means nothing usable landed, whatever stdout narrated: never report success, run `git diff`.
 - Exit code **3** = vibe exited 0 but the run failed (`wrote_nothing`, `write_mismatch`, `syntax_error`, `sr_fail`, ...). A `vibe-delegate ... && next` chain now stops there.
-- `=== WRITE AUDIT (journal vs disk) ===` lists every write Vibe journaled and whether the file really changed. `MISMATCH` = journaled write did not land; `0 write attempts` = Vibe only explored (turn cap, or file too large).
-- `[PREFLIGHT] large file(s)` = a file named in the prompt is >40 KB; the harness already appended a "no explore, one search_replace" instruction. For such files still prefer a single exact-anchor edit with `--require`.
-- Sessions live in `~/.vibe/logs/session/unified/<uuid>/{journal,chunks}` (compact JSON; tool `file_system.search_replace`, input `{file_path, content:[{old_str,new_str}]}`). Token counts are not in that layout's `meta.json`, so `0 tokens` is expected.
+- `FAILED [turn_cap]` (since 2026-10-01) = Vibe used every `--max-turns` model call and never gave a final answer. Vibe 2.25 exits **0** on this, so before the check it was logged `ok`. Files may be changed but the task is likely partial: diff against the task list, then delegate only the missing part.
+- `=== VIBE FINAL ANSWER ===` (since 2026-10-01) = Vibe's complete closing message, read from the session checkpoint. The `[vibe]` stream lines are cut at 400 chars — quote this block, not them.
+- `=== WRITE AUDIT (journal vs disk) ===` lists every edit/write call with its **own outcome** (`call: ok` / `call: FAILED (reason)`) and the disk state. `MISMATCH` = a successful call that did not land. A failed edit followed by a successful one on the same file is marked `recovered` and does **not** make the run FAILED (it used to, wrongly). `0 write attempts` = Vibe only explored.
+- `[PREFLIGHT] large file(s)` = a file named in the prompt is >40 KB; the harness appended a grep → read offset/limit → edit instruction. Still pass the anchor with `--require`.
+- Every prompt also gets a `RUN BUDGET` line (turn count, "use the edit tool", "keep the last turn for a summary"): Vibe has no other way to know its `--max-turns`.
+- `VIBE_HARNESS=legacy|unified` forces a backend. Benchmarked 2026-10-01: both 4/4 correct; unified faster (19–21 s vs 24–29 s), legacy ~15–30 % fewer tokens. Default (unset) = unified.
+- Sessions live in `~/.vibe/logs/session/unified/<uuid>/{journal,chunks}` (compact JSON; tool `file_system.search_replace`, input `{file_path, content:[{old_str,new_str}]}`). That layout's `meta.json` has no token stats; vibe-delegate reads them from `generations/<CURRENT>/projection-state.json` (`tokenUsage`) and the model from `runtime-state.json`. `0 tokens` / `Model: unknown` on a new run is a bug, not expected.
 
 **Red flags to act on immediately:**
 
@@ -328,7 +336,7 @@ for line in open('$JOURNAL'):
 "
 ```
 
-Confirmed case (2026-08-11, this repo): stdout showed `0 files changed` and a
+Confirmed case (2026-08-11, a delegated Python project): stdout showed `0 files changed` and a
 turn-limit stop on a `temperature.py` delegation. The journal held a complete,
 correct 5,706-char module from the *first* `write_file` call — Vibe had simply
 wrapped it as `{"module_docstring": """...."""}\n<real source>` instead of
