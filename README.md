@@ -6,7 +6,7 @@
 
 **Claude orchestrates. Vibe does the heavy lifting. You review the diff, save tokens, costs and avoid hitting limits!**
 
-Claude sees only ≈500–1500 tokens per run regardless of how many file reads Vibe performs internally — massive savings on exploratory and implementation tasks.
+Claude only reads the script's summary: ≈700–1,100 tokens of output per run in the 2026-11-09 benchmark, plus the prompt it writes, however many files Vibe reads internally (a median Vibe 3 run processes ≈215k tokens).
 
 Note that Vibe works natively with Mistral models which are capable and significantly cheaper than Claude, but Vibe can also be configured to use any other provider/model instead. Eg you can use a deepseek model with vibe tooling. 
 
@@ -22,19 +22,20 @@ Summary:
 
 ## Why
 
-**Cost savings** — Vibe's file reads and edits consume cheap delegate tokens (or whatever model you configure), not Claude tokens:
+**Cost savings** — Vibe's file reads and edits consume delegate tokens (or whatever model you configure), not Claude tokens. Measured on 28 production runs on Vibe 3 with `glm-5-3` (2026-10-29 → 2026-11-09):
 
-| Scenario | Claude Sonnet 4.6 | Mistral Medium 3.5 | DeepSeek V4 Flash |
-|----------|-------------------|--------------------|-------------------|
-| Simple 1-file tweak (800 tokens) | ≈$0.004 | ≈$0.002 | ≈$0.0001 |
-| 6-read implementation task (4,800 tokens) | ≈$0.023 | ≈$0.012 | ≈$0.0008 |
-| Complex multi-file refactor (12,000 tokens) | ≈$0.058 | ≈$0.029 | ≈$0.002 |
+| Per run | Median | 90th percentile |
+|---|---|---|
+| Tokens processed by Vibe | 215k (204k input, 16k output) | 548k |
+| Delegate cost at list price (no cache discount) | $0.35 | $0.83 |
+| Same tokens at Claude Sonnet 4.6 list price ($3/$15 per M) | $0.88 | $1.90 |
+| Wall time | 140 s | 592 s |
 
-> Costs based on official pricing (May 2026): Claude $3/$15 per M tokens, Mistral Medium 3.5 $1.50/$7.50, DeepSeek V4 Flash $0.14/$0.28. Assumes ≈85% input / 15% output, typical for coding tasks. Claude orchestration overhead: ≈500 tokens per run (negligible).
+> Input dominates because each model call re-sends the conversation; with prompt caching, both columns would be lower. List prices checked on 2026-11-09: Mistral Medium 3.5 $1.50/$7.50, DeepSeek V4 Flash $0.14/$0.28 per M tokens. On a Le Chat Pro / Vibe subscription, usage inside the plan's limits costs no API fee.
 
-> **Delegation does cost Claude tokens** — writing the prompt and reading the diff back. But the real lever is context: when Claude does the work directly, every file read accumulates in its context and is re-read on every subsequent turn. When Vibe does it, none of that enters Claude's context at all. Measured breakeven: **≈4 source files touched per task**. Below that, direct is cheaper. Above it, delegation wins by a growing margin (+66% at 10 files, +89% at 30 files). See [handoff-probe/ECONOMICS.md](https://github.com/pcx-wave/handoff-probe/blob/main/ECONOMICS.md) for the full analysis.
+> **Delegation does cost Claude tokens** — writing the prompt and reading the result back. But the real lever is context: when Claude does the work directly, every file read accumulates in its context and is re-read on every subsequent turn. When Vibe does it, none of that enters Claude's context at all. Modelled breakeven (prompt and result sizes measured, file sizes modelled): **≈4 source files touched per task**. Below that, direct is cheaper. Above it, delegation wins by a growing margin (+66% at 10 files, +89% at 30 files). See [handoff-probe/ECONOMICS.md](https://github.com/pcx-wave/handoff-probe/blob/main/ECONOMICS.md) for the full analysis.
 
-> **Le Chat Pro users:** Mistral Vibe is included in the [Le Chat Pro](https://mistral.ai/pricing) subscription (≈$18/mo). Mistral does not publicly document the exact usage limits, but community reports suggest ≈1–1.5B tokens/month are included. Within that allowance every delegation costs $0 in API fees — cheaper than any paid model.
+> **Pro plan users:** Mistral Vibe (CLI included) is part of Mistral's [Pro plan](https://mistral.ai/pricing), $14.99/mo excluding tax as of 2026-11-09. Mistral does not publish the exact usage limits; beyond them, usage continues pay-as-you-go at API rates. Inside the limits, delegations cost no API fee.
 
 ### Delegation synthesis — as of 2026-06-08 (Vibe 2.x, historical)
 
@@ -50,8 +51,8 @@ Snapshot over **2,450 vibe delegations**, 2026-05-12 → 2026-06-08 (28 days). P
 | Tokens delegated | 155.2M |
 | Exit-success rate | 79% |
 | Avg run duration | 32s |
-| **Real cost (with sub)** | **$0 Mistral (Le Chat Pro ~$18/mo) + $0.67 DeepSeek** |
-| Mistral at API rate (no sub) | ~$37 |
+| **Real cost (with sub)** | **$0 Mistral (inside the Pro subscription) + $0.67 DeepSeek** |
+| Mistral at API rate (no sub) | ~$37 cache-aware estimate ($151 at list price without cache, as logged) |
 | Same workload on Claude Sonnet 4.6 | ~$139 (cache-aware, 90.5% hit rate) |
 
 **By model**
@@ -63,9 +64,9 @@ Snapshot over **2,450 vibe delegations**, 2026-05-12 → 2026-06-08 (28 days). P
 
 > Real cost methodology: All Mistral runs (mistral-medium-3.5 + Le Chat interface) covered by Le Chat Pro subscription — $0 marginal cost. DeepSeek $0.67 is actual spend (from logs). Hit rate of 90.5% back-calculated from that spend. Claude equivalent applies the same hit rate with Claude's cache pricing ($0.30/M hits, $3/M misses, $15/M output), assuming 97.6% input / 2.4% output split.
 
-`deepseek-flash` is the value pick (88% exit-ok at ≈$0.0025/run).
+`deepseek-flash` was the value pick (88% exit-ok at ≈$0.002/run: $0.67 over 369 runs).
 
-**Error rate** (real projects, 1,964 runs — synthetic test scaffolds excluded)
+**Error rate** (earlier snapshot of 2026-05-30: real projects, 1,964 runs, synthetic test scaffolds excluded)
 
 | Class | Rate | What it is |
 |---|---|---|
@@ -78,7 +79,7 @@ Snapshot over **2,450 vibe delegations**, 2026-05-12 → 2026-06-08 (28 days). P
 | `syntax_error` | 0.4% | wrote invalid code (caught by post-run gate) |
 | `timeout` | 0.3% | task too large / context saturated |
 
-The 26% `exit_error` + `wrote_nothing` share one root cause: `search_replace` anchor not found byte-for-byte and the run abandons. The `--require` gate aborts these before they waste tokens.
+At the time, the ≈26 % `exit_error` + `wrote_nothing` was attributed to Vibe engaging but landing no edit: multi-edit context drift, or a first `search_replace` anchor not found byte-for-byte. That diagnosis was not re-verified per run. The `--require` gate added then aborts the anchor-not-found case before launch.
 
 **Versus the other delegate (`opencode`)**
 
@@ -87,10 +88,10 @@ The 26% `exit_error` + `wrote_nothing` share one root cause: `search_replace` an
 | Runs | 2,450 | 254 |
 | Tokens | 155.2M | 8.5M |
 | Exit-ok | 79% | 81% |
-| Real cost | $0.67 + ~$18/mo sub | $0 (free tiers) |
+| Real cost | $0.67 + Pro subscription | $0 (free tiers) |
 | Models | mistral-medium, deepseek-flash (paid, capable) | free deepseek / mimo / nemotron tiers |
 
-Same headline exit-rate, very different profile: `opencode` runs free tiers at zero cost but with high `silent_exit` and timeout rates. Use it for cheap exploration; vibe's paid models are the choice when the edit has to land. Both write to the same log — `/vibe-report --all` compares them.
+Same headline exit-rate, very different profile: `opencode` runs free tiers at zero cost, but 25 % of its runs produced nothing and 19 % timed out over the same period (vibe: 5 % and 0.2 %). Use it for cheap exploration; vibe's paid models are the choice when the edit has to land. Both write to the same log — `/vibe-report --all` compares them.
 
 ---
 
@@ -99,7 +100,7 @@ Same headline exit-rate, very different profile: `opencode` runs free tiers at z
 - [Mistral Vibe](https://vibe.mistral.ai/) CLI **3.x**, installed and authenticated (`vibe --version`; tested with 3.0.3). Vibe 2.x is no longer supported: the harness reads Vibe 3's run export and session journal.
 - [Claude Code](https://claude.ai/code) with skills enabled
 - `python3` (pseudo-TTY via `pty.spawn`, stream parsing, audits) and optionally `node` for JS syntax checks
-- `timeout` (GNU coreutils; on macOS install coreutils). It is only a backstop: Vibe's own `--time-limit` stops the run first
+- `timeout` on your `PATH` (GNU coreutils; on macOS, `brew install coreutils` installs it as `gtimeout`, so add coreutils' `gnubin` directory to `PATH`). It is only a backstop: Vibe's own `--time-limit` stops the run first
 - A git repository to work in
 
 ---
@@ -271,7 +272,7 @@ By default, Vibe uses whatever `active_model` is set in `~/.vibe/config.toml`. Y
 
 The override is stored in `~/.local/share/vibe-model.flag` and is picked up by `vibe-delegate` on every run. It persists across sessions until you clear it.
 
-**Reasoning effort.** A model's `thinking` level in `config.toml` drives most of a run's duration: on `glm-5-3` at `high`, 72 % of everything the model generated was hidden reasoning. You can define a second alias of the same model with a lower level and pick it with `/vibe-model-pick`. In the 2026-11-09 benchmark, `low` vs `high` on `glm-5-3` gave 12/12 vs 11/12 tasks passed and 79 s vs 93 s mean, which is within noise on small tasks. Not every level is accepted: `glm-5-3` rejects `off` with an API 400, which the script reports as `FAILED [usage_error]`.
+**Reasoning effort.** A model's `thinking` level in `config.toml` drives most of a run's duration: in the Vibe 3 sessions of 2026-10-29 → 2026-11-09 (mostly `glm-5-3` at `high`), 72 % of everything the model generated was hidden reasoning. You can define a second alias of the same model with a lower level and pick it with `/vibe-model-pick`. In the 2026-11-09 benchmark, `low` vs `high` on `glm-5-3` gave 12/12 vs 11/12 tasks passed and 79 s vs 93 s mean, which is within noise on small tasks. Not every level is accepted: `glm-5-3` rejects `off` with an API 400, which the script reports as `FAILED [usage_error]`.
 
 ### Vibe-auto mode
 
@@ -296,6 +297,7 @@ Claude intercepts code requests and applies a pre-filter before delegating:
 | Task | Action |
 |---|---|
 | 1 file, ≤10 lines, exact location known | Claude edits directly — no delegation overhead |
+| The code to insert is already written out | Claude edits directly — delegating would pay for it twice |
 | Everything else | Delegated to Vibe |
 
 Pure questions and conversations always go directly to Claude.
@@ -348,6 +350,8 @@ The **last line** is the verdict. Read it before anything Vibe narrated:
 | Last line | Meaning | What to do |
 |---|---|---|
 | `RESULT: OK — N file(s) changed` | Every write call Vibe journaled landed on disk | Review `git diff`: the harness checks writes, not correctness |
+| `RESULT: OK (UNVERIFIED)` | Files changed but no session journal was found to check them against | Review `git diff` |
+| `RESULT: OK — resumed session finished with nothing left to write` | A `--resume` whose earlier run had already done the work | Read the final answer |
 | `RESULT: READ-ONLY run` | `plan`-type run, nothing written by design | Read the final answer |
 | `RESULT: FAILED [turn_cap]` | Still out of turns after the auto-continue rounds | Split the task, or run the printed `--resume <id>` command |
 | `RESULT: FAILED [timeout]` | Total time budget used up; Vibe stopped cleanly | Same: resume or split |
@@ -355,7 +359,7 @@ The **last line** is the verdict. Read it before anything Vibe narrated:
 | `RESULT: FAILED [usage_error]` | Vibe or the provider rejected the request (bad agent, flag, model setting) | Fix it; never retry verbatim |
 | `RESULT: FAILED [wrote_nothing]` and others | Vibe explored but wrote nothing, a write did not land, syntax error, … | Inspect the WRITE AUDIT block |
 
-The script's exit code is non-zero on every `FAILED`, so `vibe-delegate ... && next-step` stops there. Vibe never commits: `git checkout .` reverts a run.
+The script's exit code is non-zero on every `FAILED`, so `vibe-delegate ... && next-step` stops there. Vibe is not asked to commit and changes are left unstaged, so `git checkout .` reverts a run. If Vibe does commit anyway, the script lists the new commits.
 
 ---
 

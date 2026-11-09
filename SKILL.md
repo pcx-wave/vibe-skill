@@ -312,50 +312,45 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 | Truncated prompt | Special chars in inline prompt | Script uses temp file — should be fixed |
 | Wrote a Python helper just to replace code | Misdiagnosed search_replace limit | Use search_replace directly for ASCII code; write_file only if new content is too long for the prompt |
 | Empty run — 0 files changed despite ≥3 tool calls | Multi-edit prompt: first `search_replace` target not found byte-for-byte | Split into sequential single-change runs; grep target string locally before delegating |
-| `Tool calls: 0` on a run that clearly did work; no `[vibe]` answer line | **Fixed 2026-08-02.** The stream parser only understood the legacy `role`-keyed schema; current Vibe emits tool calls as `type: effect` and message content as a **list** of blocks. `content.lower()` on that list threw `AttributeError`, killing the parser and discarding the whole run output | Already patched. If it reappears, the run output is still recoverable from `~/.vibe/logs/session/<newest>/messages.jsonl` — nothing is lost, only unprinted |
+| `Tool calls: 0` on a run that clearly did work; no `[vibe]` answer line | **Fixed 2026-08-02.** The stream parser only understood the legacy `role`-keyed schema; current Vibe emits tool calls as `type: effect` and message content as a **list** of blocks. `content.lower()` on that list threw `AttributeError`, killing the parser and discarding the whole run output | Already patched. If it reappears, the run is still in the session journal (`~/.vibe/logs/session/unified/<id>/journal/`) — nothing is lost, only unprinted |
 
 **If exit non-zero:** do not relaunch immediately. Read the diff, understand what was done, fix the prompt.
 
 **Mandatory pre-check before declaring WROTE_NOTHING.** stdout is a filtered
-stream, not a record of what Vibe did — the parser can drop or mislabel a
-write it doesn't recognize the shape of. The session journal is not filtered:
-`~/.vibe/logs/session/session_<ts>_<id>/messages.jsonl` records the exact
-arguments of every `write_file`/`search_replace` call, whether or not the
-write later succeeded. vibe-delegate already runs this check for you — when
-the filesystem shows 0 changed files, it scans the journal for the *newest*
-session and prints an `[RECOVERY]` block listing every write attempt found,
-with char counts, before the syntax-check section. **Read that block before
-concluding the run failed.** A run that "wrote nothing" per stdout but shows
-a few-KB `write_file` in `[RECOVERY]` did not fail — the content exists and
-is very likely usable; treat it as a formatting/parsing problem, not an empty
-run, and inspect the content in the journal directly:
+stream, not a record of what Vibe did. The session journal is not filtered:
+vibe-delegate reads it and prints the `=== WRITE AUDIT ===` block, one line per
+`edit` / `search_replace` / `write_file` call with the call's own outcome
+(`call: ok` or `call: FAILED (reason)`) and the disk state. **Read that block
+before concluding the run failed.** A `call: FAILED` line means Vibe did submit
+content and the write was refused (bad anchor, denied path, malformed call); the
+submitted content is still in the journal. To print it (Vibe 3 layout):
 
 ```bash
-JOURNAL=$(ls -t ~/.vibe/logs/session/*/messages.jsonl 2>/dev/null | head -1)   # legacy layout only; for unified sessions read WRITE AUDIT
-python3 -c "
-import json
-for line in open('$JOURNAL'):
-    m = json.loads(line)
-    if m.get('role') != 'assistant': continue
-    for tc in (m.get('tool_calls') or []):
-        fn = tc.get('function') or {}
-        if 'write' in fn.get('name',''):
-            print(json.loads(fn['arguments'])['content'])
-"
+SID=<session id from the run output or the run log>
+python3 - ~/.vibe/logs/session/unified/$SID << 'EOF'
+import glob, json, sys
+for f in sorted(glob.glob(sys.argv[1] + "/journal/*.jsonl")):
+    for line in open(f):
+        e = json.loads(line); p = e.get("payload") or {}
+        if e.get("type") == "action_intent" and p.get("kind") == "tool":
+            c = (p.get("request") or {}).get("call") or {}
+            if c.get("name", "").split(".")[-1] in ("edit", "search_replace", "write_file"):
+                a = c.get("arguments") or {}
+                print("==", c["name"], a.get("file_path") or a.get("path"))
+                print(a.get("content") or a.get("new_string") or "")
+EOF
 ```
 
-Confirmed case (2026-08-11, a delegated Python project): stdout showed `0 files changed` and a
-turn-limit stop on a `temperature.py` delegation. The journal held a complete,
-correct 5,706-char module from the *first* `write_file` call — Vibe had simply
-wrapped it as `{"module_docstring": """...."""}\n<real source>` instead of
-emitting raw source, the write step rejected the shape, and Vibe burned the
-rest of the turn budget on write→rm→write instead of on the actual task.
-Stripping the one-line JSON envelope recovered the module outright — no
-retry needed. The retry that *was* run cost ~180k tokens for a result no
-better than turn 1's output already sitting in the journal.
+(The live journal is pruned on every resume; earlier rounds are only in the
+per-round copies the harness reads while it runs.)
 
-If, after reading the journal, there is genuinely no `write_file`/`edit` call
-for the target file at all — that's the real WROTE_NOTHING, and Step 6 applies.
+Confirmed case (2026-08-11, Vibe 2): stdout showed `0 files changed`, yet the
+journal held a complete, correct 5,706-char module from the *first*
+`write_file` call, wrapped in a JSON envelope the write step rejected. Stripping
+the envelope recovered it; the retry that was run instead cost ~180k tokens.
+
+If the WRITE AUDIT shows no write call for the target file at all, that is the
+real WROTE_NOTHING, and Step 6 applies.
 
 ---
 
