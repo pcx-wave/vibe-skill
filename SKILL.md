@@ -272,7 +272,7 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 [log] → ~/.local/share/delegate-runs.jsonl  (4800 tokens, exit 0, 34.2s)
 ```
 
-**Vibe never commits.** All changes are left unstaged — `git checkout .` reverts everything if needed.
+**Vibe must not commit.** The harness prompt tells it to leave every change uncommitted (none of the 520 delegated sessions on record committed in the project); `git checkout .` reverts everything. If a `=== COMMITS CREATED ===` block appears, Vibe committed anyway: review those commits before anything else.
 
 **Verdict lines (since 2026-09-30) — read these before anything else:**
 

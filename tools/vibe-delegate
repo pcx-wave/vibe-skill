@@ -194,7 +194,9 @@ PROMPT="$PROMPT
 
 RUN BUDGET: you have $MAX_TURNS turns in total. For in-place changes use the edit tool (to batch many similar edits in one turn you may call tools.file_system.edit from run_typescript). Keep your last turn for a short final summary of what you changed.
 
-CHECKS: run only quick, targeted checks (one test file, one import, one script), each well under 60 s. Never run a full build, a whole-project type-check or the whole test suite: the caller verifies afterwards, and a long command can eat the run's whole time budget."
+CHECKS: run only quick, targeted checks (one test file, one import, one script), each well under 60 s. Never run a full build, a whole-project type-check or the whole test suite: the caller verifies afterwards, and a long command can eat the run's whole time budget.
+
+GIT: do not commit, push, stash, reset or switch branches. Leave every change uncommitted in the working tree: the caller reviews the diff and commits."
 if [ "$READONLY" = 1 ]; then
   PROMPT="$PROMPT
 
@@ -580,6 +582,11 @@ except (OSError, ValueError):
     st = {}
 u_in = sum(((e.get('usage') or {}).get('input_tokens') or 0) for e in exps)
 u_out = sum(((e.get('usage') or {}).get('output_tokens') or 0) for e in exps)
+u_cached = sum(((e.get('usage') or {}).get('cached_input_tokens') or 0) for e in exps)
+# Vibe's own cost is cache-aware (cached input billed at the provider's cached
+# rate); None as soon as one round lacks it.
+_costs = [e.get('cost_usd') for e in exps]
+u_cost = round(sum(_costs), 6) if all(isinstance(c, (int, float)) for c in _costs) else None
 last = exps[-1]
 st.update({
     'vibe_outcome': last.get('outcome'),
@@ -592,6 +599,8 @@ st.update({
     'session_id': last.get('session_id'),
     'export_tokens_in': u_in,
     'export_tokens_out': u_out,
+    'export_cached_in': u_cached,
+    'export_cost_usd': u_cost,
 })
 json.dump(st, open(sf, 'w'))
 PYAGG
@@ -700,7 +709,7 @@ try:
         if _ex.get('export_tokens_in') or _ex.get('export_tokens_out'):
             session_in, session_out = _ex['export_tokens_in'], _ex['export_tokens_out']
     except Exception:
-        pass
+        _ex = {}
     # Read per-model pricing from ~/.vibe/config.toml (fallback: Mistral Medium 3.5 rates)
     input_price, output_price = 1.5, 7.5
     try:
@@ -738,10 +747,20 @@ try:
         else:
             run_tokens_in, run_tokens_out = prompt, completion
     run_total = run_tokens_in + run_tokens_out
-    # NOTE: cost is cache-blind — Vibe's meta.json exposes no cache-hit/miss split,
-    # so all input is priced at the full input rate. Treat cost_usd as an upper bound.
-    run_cost = (run_tokens_in * input_price + run_tokens_out * output_price) / 1_000_000
-    claude_cost = (run_tokens_in * 3.0 + run_tokens_out * 15.0) / 1_000_000
+    # Cache-aware since 2026-11-09. input_tokens INCLUDES cached_input_tokens
+    # (Vibe 3 export). Most input is the conversation re-sent on every call and is
+    # served from cache: pricing it all at the full rate overstated the cost about
+    # 2x (one run: \$0.0289 cache-blind vs \$0.0154 billed by Vibe). Use Vibe's
+    # own cost when it exported one. The Claude equivalent applies Claude's cache
+    # read rate (\$0.30/M) to the same cached share; cache writes are ignored.
+    cached_in = min(int(_ex.get('export_cached_in') or 0), run_tokens_in)
+    uncached_in = run_tokens_in - cached_in
+    if isinstance(_ex.get('export_cost_usd'), (int, float)):
+        run_cost, cost_source = float(_ex['export_cost_usd']), 'vibe_export'
+    else:
+        run_cost = (run_tokens_in * input_price + run_tokens_out * output_price) / 1_000_000
+        cost_source = 'list_price_no_cache'
+    claude_cost = (uncached_in * 3.0 + cached_in * 0.30 + run_tokens_out * 15.0) / 1_000_000
     verbose = os.environ.get('DELEGATE_VERBOSE', '0') == '1'
     print(f'Model               : {model_name}')
     if verbose:
@@ -757,9 +776,9 @@ try:
         else:
             print(f'  Claude equiv            = ${claude_cost:.4f}')
     else:
-        print(f'Delegate tokens (run): {run_total:,}  (last turn: {prompt:,}+{completion:,})  |  cost ~\${run_cost:.4f}')
+        print(f'Delegate tokens (run): {run_total:,}  ({cached_in:,} of {run_tokens_in:,} input cached)  |  cost ~\${run_cost:.4f} ({cost_source})')
         if run_cost > 0:
-            print(f'Claude Sonnet 4.6 eq: same tokens would cost ~\${claude_cost:.4f}  (ratio x{claude_cost/run_cost:.1f})')
+            print(f'Claude Sonnet 4.6 eq: same tokens, same cache share ~\${claude_cost:.4f}  (ratio x{claude_cost/run_cost:.1f})')
         else:
             print(f'Claude Sonnet 4.6 eq: ~\${claude_cost:.4f}')
     # Merge token stats into the delegate stats file.
@@ -774,6 +793,9 @@ try:
             'tokens_out':   run_tokens_out,
             'tokens_total': run_total,
             'cost_usd':     round(run_cost, 6),
+            'cost_source':  cost_source,
+            'tokens_cached_in': cached_in,
+            'cost_claude_eq': round(claude_cost, 6),
             'model':        model_name,
             'turn_cap_hit': turn_cap_hit,
         })
@@ -1118,7 +1140,8 @@ entry.update(stats)
 # Compute Claude Sonnet 4.6 equivalent cost for savings tracking.
 ti = entry.get('tokens_in', 0)
 to = entry.get('tokens_out', 0)
-entry['cost_claude_eq'] = round((ti * 3.0 + to * 15.0) / 1_000_000, 6)
+if not isinstance(entry.get('cost_claude_eq'), (int, float)):
+    entry['cost_claude_eq'] = round((ti * 3.0 + to * 15.0) / 1_000_000, 6)
 
 # failure_reason: specific classification of run outcome (more precise than wrote_nothing).
 # silent_exit   — vibe never engaged: 0 tokens, 0 tool calls (immediate exit or auth failure)

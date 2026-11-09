@@ -22,16 +22,16 @@ Summary:
 
 ## Why
 
-**Cost savings** — Vibe's file reads and edits consume delegate tokens (or whatever model you configure), not Claude tokens. Measured on 28 production runs on Vibe 3 with `glm-5-3` (2026-10-29 → 2026-11-09):
+**Cost savings** — Vibe's file reads and edits consume delegate tokens (or whatever model you configure), not Claude tokens. Most of a run's input is the conversation re-sent on every model call, and about 92 % of it is served from the provider's cache. Measured on 4 benchmark tasks with `glm-5-3` (2026-11-09; cost as billed by Vibe's own run export):
 
-| Per run | Median | 90th percentile |
-|---|---|---|
-| Tokens processed by Vibe | 215k (204k input, 16k output) | 548k |
-| Delegate cost at list price (no cache discount) | $0.35 | $0.83 |
-| Same tokens at Claude Sonnet 4.6 list price ($3/$15 per M) | $0.88 | $1.90 |
-| Wall time | 140 s | 592 s |
+| Per run | Range over 4 tasks |
+|---|---|
+| Tokens processed by Vibe | 59k – 108k (90 – 94 % of input cached) |
+| Delegate cost (cache-aware) | $0.028 – $0.041 |
+| Same tokens and cache share at Claude Sonnet 4.6 rates ($3 in, $0.30 cached, $15 out per M) | $0.055 – $0.072 (≈1.9× more) |
+| Wall time | 52 – 60 s |
 
-> Input dominates because each model call re-sends the conversation; with prompt caching, both columns would be lower. List prices checked on 2026-11-09: Mistral Medium 3.5 $1.50/$7.50, DeepSeek V4 Flash $0.14/$0.28 per M tokens. On a Le Chat Pro / Vibe subscription, usage inside the plan's limits costs no API fee.
+> Production runs are larger: the median Vibe 3 run (28 runs, 2026-10-29 → 2026-11-09) processed 215k tokens. Their cost was logged before the harness read the cache split, at list price with no cache discount ($0.35 median; Claude equivalent $0.88). On the benchmark runs that method overstated the delegate cost 3.1 – 3.8× and the Claude equivalent 3.5 – 4.8×. Since 2026-11-09 each run logs `cost_usd` from Vibe's export (`cost_source: vibe_export`) and a cache-aware `cost_claude_eq`. The "same tokens" comparison is only indicative: Claude doing the task itself would make a different number of calls. On a Mistral Pro subscription, usage inside the plan's limits costs no API fee. List prices checked on 2026-11-09: Mistral Medium 3.5 $1.50/$7.50, DeepSeek V4 Flash $0.14/$0.28 per M tokens.
 
 > **Delegation does cost Claude tokens** — writing the prompt and reading the result back. But the real lever is context: when Claude does the work directly, every file read accumulates in its context and is re-read on every subsequent turn. When Vibe does it, none of that enters Claude's context at all. Modelled breakeven (prompt and result sizes measured, file sizes modelled): **≈4 source files touched per task**. Below that, direct is cheaper. Above it, delegation wins by a growing margin (+66% at 10 files, +89% at 30 files). See [handoff-probe/ECONOMICS.md](https://github.com/pcx-wave/handoff-probe/blob/main/ECONOMICS.md) for the full analysis.
 
@@ -359,7 +359,7 @@ The **last line** is the verdict. Read it before anything Vibe narrated:
 | `RESULT: FAILED [usage_error]` | Vibe or the provider rejected the request (bad agent, flag, model setting) | Fix it; never retry verbatim |
 | `RESULT: FAILED [wrote_nothing]` and others | Vibe explored but wrote nothing, a write did not land, syntax error, … | Inspect the WRITE AUDIT block |
 
-The script's exit code is non-zero on every `FAILED`, so `vibe-delegate ... && next-step` stops there. Vibe is not asked to commit and changes are left unstaged, so `git checkout .` reverts a run. If Vibe does commit anyway, the script lists the new commits.
+The script's exit code is non-zero on every `FAILED`, so `vibe-delegate ... && next-step` stops there. Vibe must not commit: the prompt tells it to leave every change uncommitted, so `git checkout .` reverts a run. In the 520 delegated sessions on record it never committed in the project (once, in a throwaway test repo under `/tmp`). If it ever does, the script prints a `COMMITS CREATED` block.
 
 ---
 
