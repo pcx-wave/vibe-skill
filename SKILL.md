@@ -37,7 +37,10 @@ When `vibe-auto.flag` exists, apply this gate **before** loading the full skill:
 | Task signal | Action |
 |---|---|
 | 1 file, ≤10 lines, exact location already known | Edit directly — do NOT invoke the skill |
+| The code to insert is already written out (you could paste it into the prompt verbatim) | Edit directly — do NOT invoke the skill. Delegating it pays the tokens twice (writing the prompt + Vibe re-reading the file) and adds minutes per run (2026-10-21: 6 runs, ~20 min, all with verbatim code) |
 | Logic non-trivial, location unclear, multiple files, HTML/JS content, or >1 change | Invoke `/vibe` as normal |
+
+Delegation pays only when Vibe does the *thinking* (finding the place, writing logic you have not written). If your prompt would contain the final code, you have already done the work: apply it yourself.
 
 ---
 
@@ -271,7 +274,7 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 
 **Verdict lines (since 2026-09-30) — read these before anything else:**
 
-- Last line is `=== RESULT: OK ... ===` or `=== RESULT: FAILED [reason] ... ===` (or `READ-ONLY`). `FAILED` means nothing usable landed, whatever stdout narrated: never report success, run `git diff`.
+- Last line is `=== RESULT: OK ... ===` (or `OK (UNVERIFIED)` when no session journal was found — read git diff), or `=== RESULT: FAILED [reason] ... ===` (or `READ-ONLY`). `FAILED` means nothing usable landed, whatever stdout narrated: never report success, run `git diff`.
 - Exit code **3** = vibe exited 0 but the run failed (`wrote_nothing`, `write_mismatch`, `syntax_error`, `sr_fail`, ...). A `vibe-delegate ... && next` chain now stops there.
 - `FAILED [turn_cap]` (since 2026-10-01) = Vibe used every `--max-turns` model call and never gave a final answer. Vibe 2.25 exits **0** on this, so before the check it was logged `ok`. Files may be changed but the task is likely partial: diff against the task list, then delegate only the missing part.
 - `=== VIBE FINAL ANSWER ===` (since 2026-10-01) = Vibe's complete closing message, read from the session checkpoint. The `[vibe]` stream lines are cut at 400 chars — quote this block, not them.

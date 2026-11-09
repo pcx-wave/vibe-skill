@@ -34,7 +34,11 @@ POSITIONAL=()
 VERBOSE=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --require) REQUIRES+=("$2"); shift 2 ;;
+    --require)
+      # `shift 2` fails (and shifts nothing) when --require is the last arg, which
+      # re-enters this loop forever: a dangling --require hung the caller.
+      if [ $# -lt 2 ]; then echo "ERROR: --require needs a string argument" >&2; exit 2; fi
+      REQUIRES+=("$2"); shift 2 ;;
     --verbose) VERBOSE=1; shift ;;
     *) POSITIONAL+=("$1"); shift ;;
   esac
@@ -67,7 +71,14 @@ fi
 if [ "${#REQUIRES[@]}" -gt 0 ]; then
   MISSING=()
   for s in "${REQUIRES[@]}"; do
-    grep -rqF -- "$s" "$WORKDIR" 2>/dev/null || MISSING+=("$s")
+    # Scope to source: git grep (tracked + untracked, honours .gitignore) in a repo,
+    # else recursive grep excluding .git/node_modules. A bare `grep -r` also hit
+    # .git packfiles and vendored dirs, so a stale anchor could false-pass.
+    if git -C "$WORKDIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      git -C "$WORKDIR" grep -qF --untracked -e "$s" 2>/dev/null || MISSING+=("$s")
+    else
+      grep -rqF --exclude-dir=.git --exclude-dir=node_modules -e "$s" "$WORKDIR" 2>/dev/null || MISSING+=("$s")
+    fi
   done
   if [ "${#MISSING[@]}" -gt 0 ]; then
     echo "=== PRECHECK ABORT — required string(s) not found in $WORKDIR ==="
@@ -397,7 +408,40 @@ VIBE_HOME="${VIBE_HOME:-$HOME/.vibe}"
 # maxdepth 3: legacy layout is session_*/meta.json (depth 2); since ~2026-09 Vibe
 # writes unified/<uuid>/meta.json (depth 3). With depth 2 only, every run was
 # blind ("no session log", no journal recovery, no write audit).
-SESSION_LOG=$(find "$VIBE_HOME/logs/session" -mindepth 2 -maxdepth 3 -name meta.json -newer "$SENTINEL" 2>/dev/null | xargs -r ls -t 2>/dev/null | head -1)
+# Pick OUR session, not merely the most recently touched one. 2026-10-07: a long-lived
+# Vibe session of another project had its
+# meta.json bumped during a run in another repo, was picked as "newest", and the
+# verdict/WRITE AUDIT/token count then described the wrong project (FAILED [timeout]
+# while the real session had 26 successful edits). A candidate must (1) have been
+# started after this run began (start_time) and (2) belong to this workdir
+# (origin_directory / environment.working_directory). Legacy meta.json without a
+# directory is kept as a candidate.
+SESSION_LOG=$(find "$VIBE_HOME/logs/session" -mindepth 2 -maxdepth 3 -name meta.json -newer "$SENTINEL" 2>/dev/null \
+  | RUN_WORKDIR="$WORKDIR" RUN_SENTINEL="$SENTINEL" python3 -c "
+import sys, os, json, datetime
+wd = os.path.realpath(os.environ['RUN_WORKDIR'])
+t0 = os.path.getmtime(os.environ['RUN_SENTINEL']) - 10
+best = None
+for p in sys.stdin.read().split():
+    try:
+        m = json.load(open(p))
+    except Exception:
+        continue
+    d = m.get('origin_directory') or (m.get('environment') or {}).get('working_directory') or ''
+    if d and os.path.realpath(d) != wd:
+        continue
+    st = m.get('start_time')
+    if st:
+        try:
+            if datetime.datetime.fromisoformat(st).timestamp() < t0:
+                continue
+        except Exception:
+            pass
+    mt = os.path.getmtime(p)
+    if best is None or mt > best[0]:
+        best = (mt, p)
+print(best[1] if best else '')
+")
 if [ -z "$SESSION_LOG" ]; then
   echo "(no session log newer than run start — token count unknown, not reusing stale data)"
 fi
@@ -656,7 +700,8 @@ for f in changed:
     if not os.path.isfile(f):
         continue
     if   f.endswith('.py'):
-        check(['python3', '-m', 'py_compile', f], f)
+        # compile() in-process: `py_compile` wrote __pycache__/ into the user's repo.
+        check(['python3', '-c', 'import sys;compile(open(sys.argv[1],encoding="utf-8").read(),sys.argv[1],"exec")', f], f)
     elif f.endswith(('.js', '.mjs', '.cjs')) and has('node'):
         check(['node', '--check', f], f)
     elif f.endswith('.rb') and has('ruby'):
@@ -831,6 +876,7 @@ FILES_CHANGED_COUNT=$(printf '%s\n' "$CHANGED" | grep -c '[^[:space:]]' 2>/dev/n
 FILES_CHANGED_COUNT=${FILES_CHANGED_COUNT:-0}
 TOTAL_ERRORS=${TOTAL_ERRORS:-0}
 
+[ -n "$SESSION_LOG" ] && export DELEGATE_HAD_SESSION=1
 export DELEGATE_NAME="vibe"
 export DELEGATE_WORKDIR="$WORKDIR"
 export DELEGATE_EXIT="$VIBE_EXIT"
@@ -1015,7 +1061,10 @@ if _reason in _FAIL_HINTS:
 elif _agent in _readonly_agents:
     print('=== RESULT: READ-ONLY run (no writes expected) ===')
 else:
-    print(f'=== RESULT: OK — {_fc} file(s) changed, verified against the session journal ===')
+    if os.environ.get('DELEGATE_HAD_SESSION') == '1':
+        print(f'=== RESULT: OK — {_fc} file(s) changed, verified against the session journal ===')
+    else:
+        print(f'=== RESULT: OK (UNVERIFIED) — {_fc} file(s) changed on disk, but no session journal was found to cross-check. Read git diff. ===')
 try:
     with open(os.environ['DELEGATE_REASON_FILE'], 'w') as _rf:
         _rf.write(_reason)
