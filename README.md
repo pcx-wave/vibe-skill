@@ -6,7 +6,7 @@
 
 **Claude orchestrates. Vibe does the heavy lifting. You review the diff, save tokens, costs and avoid hitting limits!**
 
-Claude only reads the script's summary: ≈700–1,100 tokens of output per run in the 2026-11-09 benchmark, plus the prompt it writes, however many files Vibe reads internally (a median Vibe 3 run processes ≈215k tokens).
+Claude only reads the script's summary (≈700–1,100 tokens per run), however many files Vibe reads internally (a median Vibe 3 run processes ≈215k tokens). Delegation still has a fixed cost on Claude's side, so it pays on tasks that would make Claude read or iterate a lot, not on small targeted edits: see the measurements below.
 
 Note that Vibe works natively with Mistral models which are capable and significantly cheaper than Claude, but Vibe can also be configured to use any other provider/model instead. Eg you can use a deepseek model with vibe tooling. 
 
@@ -33,9 +33,17 @@ Summary:
 
 > Production runs are larger: the median Vibe 3 run (28 runs, 2026-10-29 → 2026-11-09) processed 215k tokens. Their cost was logged before the harness read the cache split, at list price with no cache discount ($0.35 median; Claude equivalent $0.88). On the benchmark runs that method overstated the delegate cost 3.1 – 3.8× and the Claude equivalent 3.5 – 4.8×. Since 2026-11-09 each run logs `cost_usd` from Vibe's export (`cost_source: vibe_export`) and a cache-aware `cost_claude_eq`. The "same tokens" comparison is only indicative: Claude doing the task itself would make a different number of calls. On a Mistral Pro subscription, usage inside the plan's limits costs no API fee. List prices checked on 2026-11-09: Mistral Medium 3.5 $1.50/$7.50, DeepSeek V4 Flash $0.14/$0.28 per M tokens.
 
-> **Delegation does cost Claude tokens** — writing the prompt and reading the result back. But the real lever is context: when Claude does the work directly, every file read accumulates in its context and is re-read on every subsequent turn. When Vibe does it, none of that enters Claude's context at all. Modelled breakeven (prompt and result sizes measured, file sizes modelled): **≈4 source files touched per task**. Below that, direct is cheaper. Above it, delegation wins by a growing margin (+66% at 10 files, +89% at 30 files). See [handoff-probe/ECONOMICS.md](https://github.com/pcx-wave/handoff-probe/blob/main/ECONOMICS.md) for the full analysis.
+> **Delegation does cost Claude tokens, and on small tasks it costs more than doing the work.** Measured on 2026-11-10 with headless `claude -p` (Sonnet 5.5, same tool set in both arms, delegation forced in the Vibe arm, hidden acceptance tests passed in every run):
+>
+> | Session | Claude does it | Claude delegates to Vibe |
+> |---|---|---|
+> | 1 task, same change in 10 modules | $0.20 | $0.24–0.32 (4–8 delegations) |
+> | 3 tasks in a row, 10 modules each | $0.19 | $0.25–0.26 (3 delegations) |
+>
+> About $0.14 of every session is Claude Code's fixed context (system prompt, tools, skill list), paid either way. On top of it, a delegation costs Claude ≈$0.03 (writing the prompt, extra turns, reading the report) plus ≈5,300 tokens once per session to load this skill (it was ≈12,900 before SKILL.md was cut on 2026-11-10). These grep-able edits cost Claude only ≈$0.02 each when done directly: it finds the lines and edits them without reading whole files, whatever the file size (2.9 to 26 KB per module made no difference). **Delegating pays when doing it yourself would cost Claude more than ≈$0.03 per task: roughly when it would have to read more than ≈7k tokens (≈25 KB) of code in full, or iterate (debugging, exploration, several failed attempts).** Small samples (2 runs per cell): treat the figures as orders of magnitude. The earlier modelled claim (savings from ≈4 files touched, see [handoff-probe/ECONOMICS.md](https://github.com/pcx-wave/handoff-probe/blob/main/ECONOMICS.md)) is not supported for targeted edits.
 
-> **Pro plan users:** Mistral Vibe (CLI included) is part of Mistral's [Pro plan](https://mistral.ai/pricing), $14.99/mo excluding tax as of 2026-11-09. Mistral does not publish the exact usage limits; beyond them, usage continues pay-as-you-go at API rates. Inside the limits, delegations cost no API fee.
+
+> **Pro plan users:** Mistral Vibe (CLI included) is part of Mistral's [Pro plan](https://mistral.ai/pricing), $14.99/mo excluding tax as of 2026-11-09. The pricing page shows only a small API-credit figure and "fair usage" wording for Vibe; the Vibe Code allowance actually included is much larger than that figure but is not published, so check your own account. Beyond it, usage stops or continues pay-as-you-go at API rates (off by default). Inside it, delegations cost no API fee: in practice the Vibe side is free, and the real cost of a delegation is on Claude's side (above). The free plan also includes limited Vibe CLI use.
 
 ### Delegation synthesis — as of 2026-06-08 (Vibe 2.x, historical)
 
