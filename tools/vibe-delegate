@@ -785,22 +785,43 @@ except Exception as e:
 fi
 
 # Full final answer (H6). The stream parser cuts every [vibe] line at 400 chars,
-# so the supervisor never saw Vibe's own summary; the checkpoint has it whole.
+# so the supervisor never saw Vibe's own summary. Vibe 3 has no turn outcome in
+# checkpoint.json (the block was always empty since 2026-10-29): the answer is
+# the text of the last model completion in the journal. Round copies are read
+# too, because the live journal is pruned on every resume.
 if [ -n "$SESSION_LOG" ]; then
-  python3 - "$(dirname "$SESSION_LOG")" << 'PYANSWER'
-import json, re, sys
+  AUDIT_RUN_DIR="$RUN_DIR" python3 - "$(dirname "$SESSION_LOG")" << 'PYANSWER'
+import glob, json, os, re, sys
 sess = sys.argv[1]
-try:
-    gen = json.load(open(sess + "/CURRENT"))["generation"]
-    out = (json.load(open(f"{sess}/generations/{gen}/checkpoint.json")).get("turn") or {}).get("outcome") or {}
-    text = "\n".join(b.get("text", "") for b in out.get("output") or [] if isinstance(b, dict)).strip()
-except (OSError, ValueError, KeyError):
-    sys.exit(0)  # legacy layout: the [vibe] lines are all there is
+files = sorted(glob.glob(sess + "/journal/*.jsonl"))
+rd = os.environ.get("AUDIT_RUN_DIR", "")
+if rd:
+    files += sorted(glob.glob(rd + "/round-*/session/journal/*.jsonl"))
+skip = int(os.environ.get("AUDIT_SKIP_SEQ", "0") or 0)
+best = (-1, "")
+for f in files:
+    for line in open(f, errors="replace"):
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(e, dict) or e.get("type") != "action_result":
+            continue
+        seq = e.get("sequence") or 0
+        if seq <= skip or seq <= best[0]:
+            continue
+        r = ((e.get("payload") or {}).get("result") or {}).get("result")
+        if not isinstance(r, dict) or "finish_reason" not in r:
+            continue
+        text = "\n".join(p.get("text", "") for p in r.get("parts") or []
+                         if isinstance(p, dict) and p.get("type") == "text").strip()
+        if text:
+            best = (seq, text)
 # Same control-char stripping as the stream parser: this text reaches a terminal
 # and the orchestrating model.
-text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", best[1])
 print("")
-print("=== VIBE FINAL ANSWER (full, from session checkpoint) ===")
+print("=== VIBE FINAL ANSWER (full, last model message from the session journal) ===")
 print(text if text else "(none — Vibe stopped before writing a final message; see RESULT below)")
 PYANSWER
 fi

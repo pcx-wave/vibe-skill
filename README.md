@@ -13,9 +13,10 @@ Note that Vibe works natively with Mistral models which are capable and signific
 Summary:
 1. User types `/vibe <instruction>` in Claude Code
 2. Claude decomposes the task and writes a prompt
-3. `vibe-delegate` runs Mistral Vibe in a pseudo-TTY
-4. The delegate reports tool calls, token counts, and `git diff --stat`
-5. Claude reviews the diff and summarizes the result
+3. `vibe-delegate` runs Mistral Vibe in a pseudo-TTY, within a turn and time budget
+4. If Vibe runs out of turns, the same session is resumed automatically (it keeps its context)
+5. The delegate checks every write against Vibe's session journal and prints one verdict line: `RESULT: OK` or `RESULT: FAILED [reason]`
+6. Claude reviews the diff and summarizes the result
 
 ---
 
@@ -35,7 +36,9 @@ Summary:
 
 > **Le Chat Pro users:** Mistral Vibe is included in the [Le Chat Pro](https://mistral.ai/pricing) subscription (≈$18/mo). Mistral does not publicly document the exact usage limits, but community reports suggest ≈1–1.5B tokens/month are included. Within that allowance every delegation costs $0 in API fees — cheaper than any paid model.
 
-### Delegation synthesis — as of 2026-06-08
+### Delegation synthesis — as of 2026-06-08 (Vibe 2.x, historical)
+
+> **These numbers predate Vibe 3** (released 2026-10-29), which changed the CLI's exit codes, agents and session format. Right after the upgrade, 12 of 31 delegations failed (39 %) and the harness misread most of them. The 2026-11-09 audit ([`docs/harness-audit-2026-11-09.md`](docs/harness-audit-2026-11-09.md)) has the causes, the fixes and a 24-run benchmark with hidden acceptance tests: the verdict was correct on 23 of 24 runs. Fresh Vibe 3 production numbers will replace this section once enough runs exist.
 
 Snapshot over **2,450 vibe delegations**, 2026-05-12 → 2026-06-08 (28 days). Pulled from the shared run log via `delegate-report` (vibe scope).
 
@@ -87,19 +90,16 @@ The 26% `exit_error` + `wrote_nothing` share one root cause: `search_replace` an
 | Real cost | $0.67 + ~$18/mo sub | $0 (free tiers) |
 | Models | mistral-medium, deepseek-flash (paid, capable) | free deepseek / mimo / nemotron tiers |
 
-> **Vibe 3 (2026-10-29 onward).** The table above predates Vibe 3. After the upgrade, 12 of 31 runs failed (39 %) and the harness misread most of them (out-of-turns logged as crashes, write audit blind). See [`docs/harness-audit-2026-11-09.md`](docs/harness-audit-2026-11-09.md): causes, fixes, a 24-run benchmark with hidden tests, and how to check the expected drop to ~10-15 %.
-
 Same headline exit-rate, very different profile: `opencode` runs free tiers at zero cost but with high `silent_exit` and timeout rates. Use it for cheap exploration; vibe's paid models are the choice when the edit has to land. Both write to the same log — `/vibe-report --all` compares them.
 
 ---
 
 ## Prerequisites
 
-- [Mistral Vibe](https://vibe.mistral.ai/) CLI installed and authenticated (`vibe --version`)
+- [Mistral Vibe](https://vibe.mistral.ai/) CLI **3.x**, installed and authenticated (`vibe --version`; tested with 3.0.3). Vibe 2.x is no longer supported: the harness reads Vibe 3's run export and session journal.
 - [Claude Code](https://claude.ai/code) with skills enabled
-- `script` command available (GNU/Linux or BSD/macOS variant)
-- `timeout` command available; on macOS install GNU coreutils for `gtimeout` (or ensure your chosen `timeout` fallback is set up)
-- `python3` and optionally `node` for syntax checks
+- `python3` (pseudo-TTY via `pty.spawn`, stream parsing, audits) and optionally `node` for JS syntax checks
+- `timeout` (GNU coreutils; on macOS install coreutils). It is only a backstop: Vibe's own `--time-limit` stops the run first
 - A git repository to work in
 
 ---
@@ -150,7 +150,12 @@ EOF
 
 ```
 
-Verify with `~/tools/vibe-delegate /tmp "Say hello in one sentence." 3`
+Verify with a read-only run (it must not write anything):
+
+```bash
+mkdir -p /tmp/vibe-check && ~/tools/vibe-delegate /tmp/vibe-check "Say hello in one sentence." 3 plan
+# last line: === RESULT: READ-ONLY run (no writes expected) ===
+```
 
 ### Updating
 
@@ -203,6 +208,25 @@ All optional — the no-flag path stays the default and lightest:
 - **`--verbose`** — prints the token/cost block per model: I/O with the coder model (e.g. Mistral), the total, and the projected Claude-token cost it spared.
 - **`--no-ghostwrite`** — by default, if Vibe writes nothing after 3 retries, Claude finishes the task itself (ghostwrite fallback) so the run never strands — ghostwritten files are reported separately. `--no-ghostwrite` disables that fallback: after 3 failed attempts Claude halts and asks you (retry / abort) instead.
 
+### Calling the script directly
+
+Claude calls this for you, but it works on its own:
+
+```bash
+~/tools/vibe-delegate <workdir> "<prompt>" [max-turns] [agent] [timeout-secs] [options]
+```
+
+| Argument / option | Default | What it does |
+|---|---|---|
+| `max-turns` | `10` | Model calls per round, hard cap 12. Decompose rather than raise it |
+| `agent` | `auto-approve` | `plan` (also `explore`, `code-reviewer`, …) = **read-only**: write tools disabled. `default`/`lean` map to `auto-approve` (Vibe 3 removed them) |
+| `timeout-secs` | `300` | **Total** wall-clock budget, auto-continue rounds included. Never raised by the script |
+| `--continue-rounds N` / `--no-continue` | `2` | Extra rounds on the **same session** when Vibe stops on its turn limit |
+| `--resume <session-id>` | — | Continue an earlier session; the id is printed on every partial run |
+| `--require "<string>"` | — | Repeatable. Abort before launching if the string is not in the workdir (pass your edit anchor) |
+| env `DELEGATE_MODEL=<alias>` | flag file | Model alias for this run only |
+| env `DELEGATE_RUN_LOG=<path>` | `~/.local/share/delegate-runs.jsonl` | Write the run log elsewhere: use it for tests so they never pollute your real log |
+
 ### Model selection
 
 By default, Vibe uses whatever `active_model` is set in `~/.vibe/config.toml`. You can override it per-session without touching that file:
@@ -247,6 +271,8 @@ By default, Vibe uses whatever `active_model` is set in `~/.vibe/config.toml`. Y
 
 The override is stored in `~/.local/share/vibe-model.flag` and is picked up by `vibe-delegate` on every run. It persists across sessions until you clear it.
 
+**Reasoning effort.** A model's `thinking` level in `config.toml` drives most of a run's duration: on `glm-5-3` at `high`, 72 % of everything the model generated was hidden reasoning. You can define a second alias of the same model with a lower level and pick it with `/vibe-model-pick`. In the 2026-11-09 benchmark, `low` vs `high` on `glm-5-3` gave 12/12 vs 11/12 tasks passed and 79 s vs 93 s mean, which is within noise on small tasks. Not every level is accepted: `glm-5-3` rejects `off` with an API 400, which the script reports as `FAILED [usage_error]`.
+
 ### Vibe-auto mode
 
 For frictionless delegation, enable auto-mode once in your Claude Code session:
@@ -278,32 +304,58 @@ Pure questions and conversations always go directly to Claude.
 
 ## Terminal output
 
-Sample output from a real run:
+Sample output from a real run (benchmark task; abridged, path shortened):
 
 ```
 === VIBE START ===
 Workdir : /path/to/project
 Agent   : auto-approve
-Model   : (config default)
+Model   : glm-5-3
 Turns   : 10
 Timeout : 300s total (all rounds)
-Prompt  : Stack: Python/Flask. File: app.py ...
+Prompt  : Bug: an Order with discount_percent=10 ... gives total() == 3868 cents, but the...
 ===================
-  [read]  app.py
-  [tool]  file: app.py
-  [tool]  search_replace [OK] ...
-  [vibe]  Done. Converted date to datetime.date in fetch_data().
+  [vibe] The bug is in `discount_amount`: it rounds per unit instead of once on the subtotal. Fixing it now.
+  [tool]  file: /path/to/project/shop/orders.py
+  [vibe] Now adding the regression test:
+  [tool]  file_system.bash: cat >> tests/test_basic.py ...
 Tool calls: 5  |  warns: 0  |  sr_fails: 0
-Model               : deepseek-flash
-Delegate tokens (run): 4,800  (last turn: 4,600+200)  |  cost ~$0.0007
-Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x24.0)
-=== VIBE DONE (exit: 0) ===
-=== SYNTAX OK (1 file(s) checked) ===
+Model               : glm-5-3
+Delegate tokens (run): 69,531  |  cost ~$0.1007
+
+=== VIBE FINAL ANSWER (full, last model message from the session journal) ===
+All 3 tests pass. Changes: shop/orders.py discount_amount now applies the
+discount once to the subtotal ... tests/test_basic.py adds a regression test ...
+
+=== VIBE DONE (exit: 0, outcome: finished, rounds: finished) ===
+=== SYNTAX OK (2 check(s)) ===
+
+=== WRITE AUDIT (journal vs disk) ===
+  edit           shop/orders.py  call: ok  disk: CHANGED
+  [note] tests/test_basic.py changed on disk without a write call (bash/run_typescript, or a generated file)
 
 === UNCOMMITTED CHANGES ===
- app.py | 4 ++--
-[log] → ~/.local/share/delegate-runs.jsonl  (4800 tokens, exit 0, 34.2s, saved ~$0.0161 vs Claude)
+ shop/orders.py      |  6 +-----
+ tests/test_basic.py | 13 ++++++++++++-
+[log] → ~/.local/share/delegate-runs.jsonl  (69531 tokens, exit 0, 95.7s)
+=== RESULT: OK — 2 file(s) changed, verified against the session journal ===
 ```
+
+### Reading the verdict
+
+The **last line** is the verdict. Read it before anything Vibe narrated:
+
+| Last line | Meaning | What to do |
+|---|---|---|
+| `RESULT: OK — N file(s) changed` | Every write call Vibe journaled landed on disk | Review `git diff`: the harness checks writes, not correctness |
+| `RESULT: READ-ONLY run` | `plan`-type run, nothing written by design | Read the final answer |
+| `RESULT: FAILED [turn_cap]` | Still out of turns after the auto-continue rounds | Split the task, or run the printed `--resume <id>` command |
+| `RESULT: FAILED [timeout]` | Total time budget used up; Vibe stopped cleanly | Same: resume or split |
+| `RESULT: FAILED [infra_error]` | Model API failed again after one automatic resume | Retry later, or resume |
+| `RESULT: FAILED [usage_error]` | Vibe or the provider rejected the request (bad agent, flag, model setting) | Fix it; never retry verbatim |
+| `RESULT: FAILED [wrote_nothing]` and others | Vibe explored but wrote nothing, a write did not land, syntax error, … | Inspect the WRITE AUDIT block |
+
+The script's exit code is non-zero on every `FAILED`, so `vibe-delegate ... && next-step` stops there. Vibe never commits: `git checkout .` reverts a run.
 
 ---
 
@@ -315,15 +367,19 @@ Claude Code
        └─ SKILL.md logic
             └─ ~/tools/vibe-delegate <workdir> <prompt> [turns] [agent] [timeout]
                  ├─ writes prompt to temp file (avoids shell injection with UTF-8/emoji)
-                 ├─ generates a temp shell script for the vibe command
-                 ├─ runs: python3 -c 'pty.spawn(<vibe-script>)'
-                 │         └─ allocates pseudo-TTY (required — vibe hangs without one)
-                 ├─ pipes JSON streaming output through Python parser
-                 │         └─ prints [read] / [write] / [WARN] / [vibe] lines
-                 ├─ reads real token counts from Mistral session log
+                 │    + appends the turn budget and a "quick checks only" rule
+                 ├─ runs: python3 -c 'pty.spawn(<vibe-script>)'   (vibe hangs without a TTY)
+                 │    vibe -p ... --max-turns N --time-limit T --output-dir <round dir>
+                 ├─ streams JSON output through a parser → [read] / [tool] / [WARN] / [vibe] lines
+                 ├─ reads Vibe's export.json: outcome, session id, exact token usage
+                 │    └─ turn limit hit? resume the same session (up to 2 more rounds,
+                 │       within the remaining time budget)
+                 ├─ prints Vibe's final answer, from the session journal
                  ├─ runs syntax checks on modified .py and .js files
+                 ├─ WRITE AUDIT: every edit/write call in the journal vs files changed on disk
                  ├─ prints git diff --stat
-                 └─ appends JSON entry to ~/.local/share/delegate-runs.jsonl
+                 ├─ appends JSON entry to ~/.local/share/delegate-runs.jsonl
+                 └─ prints the RESULT verdict line
 ```
 
 > Cost figures are estimates. See [`SKILL-reference.md`](SKILL-reference.md#cost-estimate-methodology) for methodology.
@@ -354,7 +410,7 @@ The log is shared with sister delegates (gemini-skill, opencode-skill), so the r
 
 ## Feedback
 
-See [`docs/feedback-claude-sonnet.md`](docs/feedback-claude-sonnet.md) for original feedback from Claude after hours of practice that drove the iterations on `vibe-delegate` — real bugs hit, root causes, and the fixes applied.
+See [`docs/feedback-claude-sonnet.md`](docs/feedback-claude-sonnet.md) for original feedback from Claude after hours of practice that drove the iterations on `vibe-delegate` — real bugs hit, root causes, and the fixes applied. Harness audits: [`docs/harness-audit-2026-10-01.md`](docs/harness-audit-2026-10-01.md) (Vibe 2.x) and [`docs/harness-audit-2026-11-09.md`](docs/harness-audit-2026-11-09.md) (Vibe 3).
 
 ---
 
