@@ -278,6 +278,7 @@ _REASON_DISPLAY = {
     'timeout':      'timeout',
     'precheck_abort':'precheck',
     'ok':           None,
+    'ok_resumed_nothing_left': None,
 }
 
 
@@ -313,7 +314,7 @@ def classify_fail(r):
 
 def is_notable(r, include_warns=False):
     fr = r.get('failure_reason', '')
-    if fr and fr not in ('ok', 'warn_only'):
+    if fr and fr not in ('ok', 'warn_only', 'ok_resumed_nothing_left'):
         return True
     if fr == 'warn_only' and include_warns:
         return True
@@ -407,7 +408,7 @@ SELF_IMPROVE_MIN_SAMPLE = 10     # min runs in window before trusting a rate
 SELF_IMPROVE_MIN_RATE   = 0.10   # 10% minimum failure rate to flag at all
 SELF_IMPROVE_RISE_DELTA = 0.05   # must rise 5pp past last-flagged rate to re-flag
 SELF_IMPROVE_WINDOW_DAYS = 14    # default window when --since isn't given
-NON_FAILURE_REASONS = {None, '', 'ok', 'sandbox_blocked_ok'}
+NON_FAILURE_REASONS = {None, '', 'ok', 'sandbox_blocked_ok', 'ok_resumed_nothing_left'}
 
 
 def self_improve_state_path(delegate):

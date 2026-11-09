@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+{ # Whole script in one group: bash parses it all before running, so editing or
+  # redeploying this file while a delegation runs cannot corrupt that run (seen
+  # 2026-11-09: 4 benchmark runs died with 'syntax error near done').
 # vibe-delegate — Launch Vibe programmatically and capture the result
 # Usage: vibe-delegate <workdir> <prompt> [max-turns] [agent] [timeout-secs]
 #
@@ -128,7 +131,7 @@ import json, os, sys
 from pathlib import Path
 from datetime import datetime, timezone
 wd = sys.argv[1]
-LOG = Path.home() / '.local' / 'share' / 'delegate-runs.jsonl'
+LOG = Path(os.environ.get('DELEGATE_RUN_LOG') or Path.home() / '.local' / 'share' / 'delegate-runs.jsonl')
 LOG.parent.mkdir(parents=True, exist_ok=True)
 entry = {
     'ts': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
@@ -147,7 +150,12 @@ fi
 # VIBE_ACTIVE_MODEL is inherited by the script child process via `script`.
 VIBE_MODEL_FLAG="$HOME/.local/share/vibe-model.flag"
 VIBE_MODEL_OVERRIDE=""
-if [ -f "$VIBE_MODEL_FLAG" ]; then
+# DELEGATE_MODEL (env) wins over the flag file: lets a caller or a benchmark pin a
+# model alias for one run without touching the user's /vibe-model-pick choice.
+if [ -n "${DELEGATE_MODEL:-}" ]; then
+  VIBE_MODEL_OVERRIDE="$DELEGATE_MODEL"
+  export VIBE_ACTIVE_MODEL="$VIBE_MODEL_OVERRIDE"
+elif [ -f "$VIBE_MODEL_FLAG" ]; then
   VIBE_MODEL_OVERRIDE=$(tr -d '[:space:]' < "$VIBE_MODEL_FLAG")
   export VIBE_ACTIVE_MODEL="$VIBE_MODEL_OVERRIDE"
 fi
@@ -184,7 +192,9 @@ fi
 # name: asking for "search_replace" made Vibe spend turns on search_tool_functions (H4).
 PROMPT="$PROMPT
 
-RUN BUDGET: you have $MAX_TURNS turns in total. For in-place changes use the edit tool (to batch many similar edits in one turn you may call tools.file_system.edit from run_typescript). Keep your last turn for a short final summary of what you changed."
+RUN BUDGET: you have $MAX_TURNS turns in total. For in-place changes use the edit tool (to batch many similar edits in one turn you may call tools.file_system.edit from run_typescript). Keep your last turn for a short final summary of what you changed.
+
+CHECKS: run only quick, targeted checks (one test file, one import, one script), each well under 60 s. Never run a full build, a whole-project type-check or the whole test suite: the caller verifies afterwards, and a long command can eat the run's whole time budget."
 if [ "$READONLY" = 1 ]; then
   PROMPT="$PROMPT
 
@@ -349,7 +359,12 @@ for raw in sys.stdin:
         status = state.get('status') or ''
         disp = state.get('display') or {}
         tools_called += 1
-        if status in ('cancelled', 'skipped'):
+        _why = safe(disp.get('message') or state.get('reason') or '')
+        if status in ('cancelled', 'skipped') and 'interrupt' in _why.lower():
+            # The run stopping (--time-limit deadline, turn end) interrupts the
+            # running tool: that is not an approval refusal.
+            print(f'  [STOPPED] {tool_name} {filepath} - {_why} (run ended mid-call)', flush=True)
+        elif status in ('cancelled', 'skipped'):
             # A denied approval lands here. Silent in the old parser: the run
             # exited 0 having done nothing, with no hint why.
             # 'skipped' matters too: project_effect_state tests event.cancelled
@@ -462,6 +477,13 @@ return "${PIPESTATUS[0]}"
 }
 
 # read_export <dir> → prints "outcome|session_id|steps|error message" ("" if no export).
+# A 4xx from the model API (except 429 rate limit) is a request the provider will
+# refuse again (e.g. "reasoning_effort 'none' is not supported for this model"):
+# resuming it only burns another round. Seen 2026-11-09, 8/8 runs.
+is_permanent_api_error() {
+  printf '%s' "$1" | grep -qE 'Status 4[0-9][0-9]' && ! printf '%s' "$1" | grep -q 'Status 429'
+}
+
 read_export() {
   python3 - "$1/export.json" << 'PYEXP'
 import json, sys
@@ -483,20 +505,22 @@ PYEXP
 # A resumed session's runtime-state already lists the earlier run's actions; the
 # WRITE AUDIT must skip them, or their files (untouched in THIS run) would show
 # as MISMATCH and fail the run.
-AUDIT_SKIP_ACTIONS=0
+AUDIT_SKIP_SEQ=0
 if [ -n "$RESUME_SESSION" ]; then
-  AUDIT_SKIP_ACTIONS=$(python3 - "${VIBE_HOME:-$HOME/.vibe}/logs/session/unified/$RESUME_SESSION" << 'PYSKIP'
-import json, sys
-s = sys.argv[1]
-try:
-    gen = json.load(open(s + "/CURRENT"))["generation"]
-    print(len(json.load(open(f"{s}/generations/{gen}/runtime-state.json")).get("actions") or []))
-except (OSError, ValueError, KeyError):
-    print(0)
+  AUDIT_SKIP_SEQ=$(python3 - "${VIBE_HOME:-$HOME/.vibe}/logs/session/unified/$RESUME_SESSION" << 'PYSKIP'
+import glob, json, sys
+last = 0
+for f in glob.glob(sys.argv[1] + "/journal/*.jsonl"):
+    for line in open(f, errors="replace"):
+        try:
+            last = max(last, int(json.loads(line).get("sequence") or 0))
+        except (ValueError, AttributeError, TypeError):
+            pass
+print(last)
 PYSKIP
 )
 fi
-export AUDIT_SKIP_ACTIONS
+export AUDIT_SKIP_SEQ
 
 ROUND=0
 CONTINUED=0
@@ -516,7 +540,7 @@ while :; do
   NEXT=""
   if [ "$R_OUTCOME" = "turn_limit" ] && [ "$CONTINUED" -lt "$CONTINUE_ROUNDS" ] && [ -n "$CUR_SID" ]; then
     CONTINUED=$((CONTINUED + 1)); NEXT="turn limit reached — continuing the same session ($CONTINUED/$CONTINUE_ROUNDS)"
-  elif [ "$R_OUTCOME" = "infrastructure_failure" ] && [ "${R_STEPS:-0}" -gt 0 ] && [ "$INFRA_RETRIED" -eq 0 ] && [ -n "$CUR_SID" ]; then
+  elif [ "$R_OUTCOME" = "infrastructure_failure" ] && [ "${R_STEPS:-0}" -gt 0 ] && ! is_permanent_api_error "$R_ERR" && [ "$INFRA_RETRIED" -eq 0 ] && [ -n "$CUR_SID" ]; then
     # steps > 0: the agent did run, so this is the model API failing mid-run
     # (e.g. IncompleteProviderStream), not a bad flag/agent (those have 0 steps).
     INFRA_RETRIED=1; NEXT="model API failed mid-run — resuming the same session once"
@@ -777,7 +801,7 @@ except (OSError, ValueError, KeyError):
 text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
 print("")
 print("=== VIBE FINAL ANSWER (full, from session checkpoint) ===")
-print(text if text else "(none — Vibe ended without a final message; see turn_cap)")
+print(text if text else "(none — Vibe stopped before writing a final message; see RESULT below)")
 PYANSWER
 fi
 
@@ -792,70 +816,9 @@ fi
 # CWD is $WORKDIR (cd happened before launch). Anything with an mtime newer than
 # the sentinel was actually written during this run — true regardless of whether
 # the file was tracked, untracked, already dirty, or this is a non-git directory.
-CHANGED=$(find . -type f -newer "$SENTINEL" -not -path './.git/*' 2>/dev/null | sed 's|^\./||')
-
-# ── Recovery scan — only when the filesystem shows nothing changed ────────────
-# "0 files changed" on stdout is not proof Vibe wrote nothing: the session
-# journal (messages.jsonl) records every write_file call regardless of whether
-# the write later succeeded, got wrapped in an unexpected envelope, or was
-# undone by a subsequent rm. Confirmed case (2026-08-11): stdout showed 0 files
-# changed and a turn-limit stop; the journal held a complete, correct 5,706-char
-# module from the FIRST write_file call, lost because it was wrapped as
-# {"module_docstring": """...."""} and the write step rejected the shape.
-#
-# This applies the last attempt per file_path directly to disk — no attempt to
-# guess intent beyond that, no revert-tracking. The syntax check right below
-# already validates whatever lands here (refresh $CHANGED after, same as any
-# other write), so a bad recovery shows up as syntax_error, not silently as ok.
-# If content lands wrong for some other project, that's the same outcome as
-# today (wrote_nothing/exit_error) — this can only improve on that baseline.
-if [ -z "$(printf '%s' "$CHANGED" | tr -d '[:space:]')" ] && [ -n "$SESSION_LOG" ]; then
-  JOURNAL="$(dirname "$SESSION_LOG")/messages.jsonl"
-  if [ -f "$JOURNAL" ]; then
-    python3 - "$JOURNAL" << 'PYRECOVER'
-import json, sys
-
-journal = sys.argv[1]
-by_path = {}  # last attempt per path wins
-with open(journal, errors='replace') as fh:
-    for line in fh:
-        try:
-            msg = json.loads(line)
-        except ValueError:
-            continue
-        if msg.get('role') != 'assistant':
-            continue
-        for tc in (msg.get('tool_calls') or []):
-            fn = tc.get('function') or {}
-            name = str(fn.get('name', ''))
-            if 'write' not in name and 'edit' not in name and 'replace' not in name:
-                continue
-            try:
-                args = json.loads(fn.get('arguments') or '{}')
-            except ValueError:
-                continue
-            body = args.get('content') or args.get('new_string') or ''
-            path = args.get('file_path', '')
-            if body and path:
-                by_path[path] = (name, body)
-
-if by_path:
-    print(f'  [RECOVERY] stdout said 0 files changed, but the session journal has '
-          f'{len(by_path)} write attempt(s) — applying the last attempt per file:')
-    for path, (name, body) in by_path.items():
-        try:
-            with open(path, 'w') as f:
-                f.write(body)
-            print(f'    [applied] {name} -> {path}  ({len(body)} chars)')
-        except OSError as e:
-            print(f'    [FAILED to apply] {name} -> {path}: {e}')
-    print(f'  [RECOVERY] full journal: {journal}')
-    print(f'  [RECOVERY] syntax-checking recovered file(s) below, same as any other write.')
-PYRECOVER
-    # Refresh CHANGED so the syntax check (right below) picks up recovered files.
-    CHANGED=$(find . -type f -newer "$SENTINEL" -not -path './.git/*' 2>/dev/null | sed 's|^\./||')
-  fi
-fi
+# Caches created by Vibe's own test runs (__pycache__, .pytest_cache...) are not
+# changes: they inflated "N file(s) changed" (2 real edits reported as 6).
+CHANGED=$(find . \( -name .git -o -name __pycache__ -o -name .pytest_cache -o -name .mypy_cache -o -name .ruff_cache -o -name node_modules \) -prune -o -type f -newer "$SENTINEL" -print 2>/dev/null | sed 's|^\./||')
 
 SYNTAX_COUNT_FILE=$(mktemp /tmp/vibe-syntax-count-XXXXXX.txt)
 echo 0 > "$SYNTAX_COUNT_FILE"
@@ -931,125 +894,103 @@ rm -f "$SYNTAX_COUNT_FILE"
 GIT_AFTER=$(git rev-parse HEAD 2>/dev/null || echo "no-git")
 
 # ── Write audit: what Vibe journaled vs what actually changed on disk ─────────
-# stdout is a filtered stream; the session journal is the ground truth of every
-# write attempt. Unified layout: <session>/{journal/*.jsonl,chunks/*.json} with
-# tool calls named file_system.search_replace / file_system.write_file
-# (input: {file_path, content:[{old_str,new_str}]} or {file_path, content:str}).
+# The session journal is the ground truth of every write attempt. Vibe 3 layout
+# (verified 2026-11-09 on 3.0.3): <session>/journal/<first-seq>.jsonl, one record
+# per line {sequence, type, payload}. A tool call is an `action_intent` record
+# (payload.kind == "tool", payload.request.call = {name, arguments}) and its
+# outcome the `action_result` record with the same action_id (result.result.error
+# set on failure, e.g. tool_denied). Write tools: file_system.edit /
+# search_replace / write_file; target in arguments.file_path or .path.
+# The previous audit read a pre-Vibe-3 shape (toolName/input) and the pruned
+# runtime-state, so on Vibe 3 it saw 0 writes on every run.
 if [ -n "$SESSION_LOG" ] && [ -d "$(dirname "$SESSION_LOG")/journal" ]; then
-  RUN_SENTINEL="$SENTINEL" CHANGED_LIST="$CHANGED" python3 - "$(dirname "$SESSION_LOG")" << 'PYAUDIT' || AUDIT_RC=$?
-import glob, hashlib, json, os, sys
+  CHANGED_LIST="$CHANGED" AUDIT_RUN_DIR="$RUN_DIR" python3 - "$(dirname "$SESSION_LOG")" << 'PYAUDIT' || AUDIT_RC=$?
+import glob, json, os, sys
 
 sess = sys.argv[1]
-changed = {p.strip() for p in os.environ.get("CHANGED_LIST", "").split()
-           if p.strip() and "__pycache__" not in p and not p.endswith(".pyc")}
-seen, attempts = set(), []
+changed = {p.strip() for p in os.environ.get("CHANGED_LIST", "").split() if p.strip()}
+# A --resume'd session's journal also holds earlier runs' writes: skip them.
+skip = int(os.environ.get("AUDIT_SKIP_SEQ", "0") or 0)
+WRITE_TOOLS = {"edit", "search_replace", "write_file"}
 
 def rel(path):
     path = path or ""
-    return os.path.relpath(path) if os.path.isabs(path) else path
+    return os.path.relpath(path) if os.path.isabs(path) else os.path.normpath(path)
 
-# A --resume'd session's journal also holds the earlier runs' writes, whose files
-# are untouched in THIS run: they read as MISMATCH and failed the run. Journal
-# entries carry createdAt (ms epoch) — keep only those from this run onward.
-try:
-    T0_MS = (os.path.getmtime(os.environ["RUN_SENTINEL"]) - 5) * 1000
-except (KeyError, OSError):
-    T0_MS = 0
-
-def walk(o, ts=None):
-    if isinstance(o, dict):
-        if isinstance(o.get("createdAt"), (int, float)):
-            ts = o["createdAt"]
-        tn = o.get("toolName") or ""
-        inp = o.get("input")
-        if ts is not None and ts < T0_MS:
-            pass  # written by an earlier run of this session
-        elif isinstance(inp, dict) and (tn.endswith("search_replace") or tn.endswith("write_file")):
-            c = inp.get("content")
-            body = json.dumps(c, sort_keys=True) if not isinstance(c, str) else c
-            # search_replace journals the target as file_path, write_file as path.
-            target = inp.get("file_path") or inp.get("path")
-            key = (tn, target, hashlib.sha1(body.encode()).hexdigest())
-            if key not in seen:
-                seen.add(key)
-                size = len(c) if isinstance(c, str) else sum(len(e.get("new_str", "")) for e in (c or []) if isinstance(e, dict))
-                attempts.append((tn.split(".")[-1], rel(target), size))
-        for v in o.values():
-            walk(v, ts)
-    elif isinstance(o, list):
-        for v in o:
-            walk(v, ts)
-
-for f in sorted(glob.glob(sess + "/journal/*.jsonl")):
+intents, results, order = {}, {}, []
+# Vibe prunes the live journal when it snapshots a new generation (every resume,
+# so every auto-continue round): round 1 wrote a-d, the live journal then held
+# only round 2 (seen 2026-11-09). Each round's --output-dir keeps a full copy of
+# the journal as of that round's end, so read those too; action_id dedups.
+journal_files = sorted(glob.glob(sess + "/journal/*.jsonl"))
+run_dir = os.environ.get("AUDIT_RUN_DIR", "")
+if run_dir:
+    journal_files += sorted(glob.glob(run_dir + "/round-*/session/journal/*.jsonl"))
+for f in journal_files:
     for line in open(f, errors="replace"):
         try:
-            walk(json.loads(line))
+            e = json.loads(line)
         except ValueError:
-            pass
-for f in sorted(glob.glob(sess + "/chunks/*.json")):
-    try:
-        walk(json.load(open(f, errors="replace")))
-    except (ValueError, OSError):
-        pass
-
-# Per-call outcome from the unified runtime state (H5/H9, docs/harness-audit-2026-10-01.md).
-# The journal walk above sees every attempt but not whether it succeeded, so a
-# failed edit next to a successful one on the same file was shown as CHANGED.
-calls = []  # (tool, path, succeeded, error message)
-try:
-    gen = json.load(open(sess + "/CURRENT"))["generation"]
-    rt = json.load(open(f"{sess}/generations/{gen}/runtime-state.json"))
-    _skip = int(os.environ.get("AUDIT_SKIP_ACTIONS", "0") or 0)
-    for a in (rt.get("actions") or [])[_skip:]:
-        call = (a.get("request") or {}).get("call") or {}
-        name = call.get("name") or ""
-        if not (name.endswith("search_replace") or name.endswith("write_file")):
             continue
-        args = call.get("arguments") or {}
-        err = (((a.get("result") or {}).get("result") or {}).get("error") or {}).get("message", "")
-        calls.append((name.split(".")[-1], rel(args.get("file_path") or args.get("path")),
-                      a.get("state") == "succeeded", err))
-except (OSError, ValueError, KeyError):
-    pass
+        if not isinstance(e, dict) or (e.get("sequence") or 0) <= skip:
+            continue
+        p = e.get("payload") or {}
+        if not isinstance(p, dict):
+            continue
+        aid = p.get("action_id")
+        if e.get("type") == "action_intent" and p.get("kind") == "tool":
+            call = (p.get("request") or {}).get("call") or {}
+            tool = str(call.get("name") or "").split(".")[-1]
+            if tool in WRITE_TOOLS and aid not in intents:
+                args = call.get("arguments") or {}
+                body = args.get("content") if tool == "write_file" else args.get("new_string")
+                intents[aid] = (tool, rel(args.get("file_path") or args.get("path")),
+                                len(body) if isinstance(body, str) else 0)
+                order.append(aid)
+        elif e.get("type") == "action_result" and aid:
+            r = (p.get("result") or {}).get("result")
+            if isinstance(r, dict):
+                err = r.get("error") or {}
+                results[aid] = (not err, (err.get("message") or "") if isinstance(err, dict) else str(err))
 
 print("")
 print("=== WRITE AUDIT (journal vs disk) ===")
 mismatch = False
-unrecovered = 0
-if calls:
-    for tool, path, ok, err in calls:
-        disk = "CHANGED" if path in changed else "UNCHANGED"
-        call_state = "ok" if ok else f"FAILED ({err[:90]})"
-        flag = "  <-- MISMATCH" if ok and path not in changed else ""
-        mismatch = mismatch or bool(flag)
-        print(f"  {tool:<14} {path}  call: {call_state}  disk: {disk}{flag}")
-    ok_paths = {p for _, p, ok, _ in calls if ok}
-    failed_paths = {p for _, p, ok, _ in calls if not ok}
-    unrecovered = len(failed_paths - ok_paths)
-    if failed_paths and not unrecovered:
-        print("  (every failed edit was followed by a successful one on the same file — recovered)")
-    tracked = {p for _, p, _, _ in calls}
-else:
-    if not attempts:
-        print("  journal: 0 write attempts (Vibe only read/explored — check turn cap and file size)")
-    for tool, path, size in attempts:
-        state = "on disk: CHANGED" if path in changed else "on disk: UNCHANGED  <-- MISMATCH"
-        mismatch = mismatch or path not in changed
-        print(f"  {tool:<14} {path}  (+{size} chars)  {state}")
-    tracked = {p for _, p, _ in attempts}
-for p in sorted(changed - tracked):
-    # Unified harness: writes made from inside run_typescript or bash are not
-    # file_system.* actions, so they only show up here.
-    print(f"  [WARN] {p} changed on disk but no journaled write (edited via bash/run_typescript?)")
+calls = []
+for aid in order:
+    tool, path, size = intents[aid]
+    ok, err = results.get(aid, (False, "no result recorded (run stopped mid-call?)"))
+    calls.append((tool, path, ok, err))
+if not calls:
+    print("  journal: 0 write calls (Vibe only read/explored, or wrote via bash)")
+outside = set()
+for tool, path, ok, err in calls:
+    if path.startswith(".."):
+        outside.add(path)
+        print(f"  {tool:<14} {path}  call: {'ok' if ok else 'FAILED'}  (outside workdir, not checked)")
+        continue
+    disk = "CHANGED" if path in changed else "UNCHANGED"
+    flag = "  <-- MISMATCH" if ok and path not in changed else ""
+    mismatch = mismatch or bool(flag)
+    state = "ok" if ok else f"FAILED ({err[:90]})"
+    print(f"  {tool:<14} {path}  call: {state}  disk: {disk}{flag}")
+ok_paths = {p for _, p, ok, _ in calls if ok}
+failed_paths = {p for _, p, ok, _ in calls if not ok}
+unrecovered = len(failed_paths - ok_paths)
+if failed_paths and not unrecovered:
+    print("  (every failed write was followed by a successful one on the same file — recovered)")
+for p in sorted(changed - {p for _, p, _, _ in calls}):
+    print(f"  [note] {p} changed on disk without a write call (bash/run_typescript, or a generated file)")
 sf = os.environ.get("DELEGATE_STATS_FILE", "")
-if sf and calls:
+if sf:
     try:
         st = json.load(open(sf))
         st["sr_unrecovered"] = unrecovered
+        st["audit_write_calls"] = len(calls)
         json.dump(st, open(sf, "w"))
     except (OSError, ValueError):
         pass
-# exit 9 = a successful/journaled write did not land on disk (surfaced as RESULT: FAILED)
+# exit 9 = a successful write call did not land on disk (surfaced as RESULT: FAILED)
 sys.exit(9 if mismatch else 0)
 PYAUDIT
   if [ "${AUDIT_RC:-0}" = "9" ]; then export DELEGATE_AUDIT_MISMATCH=1; fi
@@ -1077,6 +1018,7 @@ FILES_CHANGED_COUNT=${FILES_CHANGED_COUNT:-0}
 TOTAL_ERRORS=${TOTAL_ERRORS:-0}
 
 [ -n "$SESSION_LOG" ] && export DELEGATE_HAD_SESSION=1
+[ -n "$RESUME_SESSION" ] && export DELEGATE_RESUMED=1
 export DELEGATE_NAME="vibe"
 export DELEGATE_WORKDIR="$WORKDIR"
 export DELEGATE_EXIT="$VIBE_EXIT"
@@ -1095,7 +1037,7 @@ import json, os, re
 from pathlib import Path
 from datetime import datetime, timezone
 
-LOG = Path.home() / '.local' / 'share' / 'delegate-runs.jsonl'
+LOG = Path(os.environ.get('DELEGATE_RUN_LOG') or Path.home() / '.local' / 'share' / 'delegate-runs.jsonl')
 LOG.parent.mkdir(parents=True, exist_ok=True)
 
 sf = os.environ.get('DELEGATE_STATS_FILE', '')
@@ -1196,7 +1138,10 @@ elif _vo == 'refusal':
     _reason = 'refusal'
 elif _vo == 'infrastructure_failure':
     # 0 steps = Vibe never ran the agent: a bad agent name/flag/config, not the API.
-    _reason = 'infra_error' if stats.get('vibe_steps') else 'usage_error'
+    # A 4xx (not 429) is the provider refusing the request itself: config, not transient.
+    _err = stats.get('vibe_error') or ''
+    _perm = bool(re.search(r'Status 4\d\d', _err)) and 'Status 429' not in _err
+    _reason = 'infra_error' if stats.get('vibe_steps') and not _perm else 'usage_error'
 elif _vo in ('usage_error', 'config_error'):
     _reason = 'usage_error'
 elif _exit not in (0, 124):
@@ -1219,6 +1164,11 @@ elif stats.get('denied_count') and _fc == 0:
     # retry-then-ghostwrite ladder — retrying a run the sandbox will deny again.
     # Deliberately NOT added to the wrote_nothing tuple below.
     _reason = 'denied'
+elif _fc == 0 and _vo == 'finished' and os.environ.get('DELEGATE_RESUMED') == '1':
+    # A resumed session that finishes without writing: the earlier run already
+    # did the work (seen 2026-11-09: 4/4 files written, then turn_limit before
+    # the summary). Not a failure; the final answer above says what is left.
+    _reason = 'ok_resumed_nothing_left'
 elif _tc == 0 and _fc == 0 and _agent not in _readonly_agents:
     # Zero tool calls always means nothing was written, regardless of how much text
     # came back. Previously this only fired when tok_out was ALSO 0, which is exactly
@@ -1272,12 +1222,12 @@ _FAIL_HINTS = {
     'syntax_error':      'files written but syntax check failed',
     'sr_fail':           'search_replace did not match (anchor/UTF-8?)',
     'exit_error':        'vibe exited non-zero',
-    'turn_cap':          'out of turns even after auto-continue — task PARTIAL; split it, or resume (below)',
+    'turn_cap':          'out of turns (auto-continue rounds included) — task PARTIAL; split it, or resume (below)',
     'timeout':           'time budget used up before Vibe finished — task PARTIAL',
     'budget_limit':      'token/price/length limit hit — task PARTIAL',
     'refusal':           'the model refused the task',
     'infra_error':       'the model API failed mid-run, even after one automatic resume',
-    'usage_error':       'Vibe refused to start (bad agent name, flag or config) — fix the argument, do NOT retry verbatim',
+    'usage_error':       'Vibe or the model API rejected the request itself (bad agent name, flag, model setting) — fix it, do NOT retry verbatim',
 }
 _sid = stats.get('session_id') or ''
 _verr = stats.get('vibe_error') or ''
@@ -1290,7 +1240,9 @@ if _reason in _FAIL_HINTS:
 elif _agent in _readonly_agents:
     print('=== RESULT: READ-ONLY run (no writes expected) ===')
 else:
-    if os.environ.get('DELEGATE_HAD_SESSION') == '1':
+    if _reason == 'ok_resumed_nothing_left':
+        print('=== RESULT: OK — resumed session finished with nothing left to write (earlier run did the work); read its final answer ===')
+    elif os.environ.get('DELEGATE_HAD_SESSION') == '1':
         print(f'=== RESULT: OK — {_fc} file(s) changed, verified against the session journal ===')
     else:
         print(f'=== RESULT: OK (UNVERIFIED) — {_fc} file(s) changed on disk, but no session journal was found to cross-check. Read git diff. ===')
@@ -1309,3 +1261,4 @@ case "$FINAL_REASON" in
     if [ "$VIBE_EXIT" -eq 0 ]; then exit 3; fi ;;
 esac
 exit $VIBE_EXIT
+}
