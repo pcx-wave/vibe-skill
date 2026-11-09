@@ -57,7 +57,7 @@ WORKDIR="${1:?Usage: vibe-delegate <workdir> <prompt> [max-turns] [agent] [timeo
 PROMPT="${2:?Prompt required}"
 MAX_TURNS="${3:-10}"
 AGENT="${4:-}"
-TIMEOUT_SECS="${5:-180}"
+TIMEOUT_SECS="${5:-300}"
 
 # Hard ceiling: SKILL.md has documented "never exceed 12 turns, decompose instead"
 # since 2026-05, but nothing enforced it — one observed session (2026-06-17) ran
@@ -88,15 +88,16 @@ case "$AGENT" in
   *) VIBE_AGENT_FLAG="$AGENT" ;;
 esac
 
-# Time budget floor (2026-11-09). Measured on 30 Vibe 3 sessions (glm-5-3): one
-# model call takes p50 13 s, p90 93 s (tool execution included). Callers passed
-# 180-600 s for 8-12 turns, so the run was killed mid-work: 4 of the 12 failures
-# since the Vibe 3 upgrade. Floor = 90 s per turn.
-MIN_TIMEOUT=$(( MAX_TURNS * 90 ))
-if [ "$TIMEOUT_SECS" -lt "$MIN_TIMEOUT" ]; then
-  echo "NOTICE: timeout ${TIMEOUT_SECS}s is below ${MAX_TURNS} turns x 90 s (measured p90 per call) — raised to ${MIN_TIMEOUT}s." >&2
-  TIMEOUT_SECS=$MIN_TIMEOUT
+# Time budget (2026-11-09). TIMEOUT_SECS is the TOTAL wall-clock budget of the
+# whole delegation, auto-continue rounds included: it is never raised. Measured
+# on the 19 successful Vibe 3 runs: p50 95 s, max 386 s; 300 s covers 17/19.
+# The 3 timeouts were not slowness (one long single-call file generation, two
+# re-read loops), so a bigger budget would only have made them fail later.
+if [ "$TIMEOUT_SECS" -lt 60 ]; then
+  echo "ERROR: timeout-secs must be >= 60 (got $TIMEOUT_SECS)" >&2; exit 2
 fi
+RUN_START=$(date +%s)
+ROUND_LIMIT=$TIMEOUT_SECS
 
 if [ ! -d "$WORKDIR" ]; then
   echo "ERROR: workdir '$WORKDIR' does not exist" >&2
@@ -205,7 +206,7 @@ echo "Agent   : ${AGENT:-auto-approve}$([ "$READONLY" = 1 ] && echo " (read-only
 [ -n "$RESUME_SESSION" ] && echo "Resume  : $RESUME_SESSION"
 echo "Model   : ${VIBE_MODEL_OVERRIDE:-(config default)}"
 echo "Turns   : $MAX_TURNS"
-echo "Timeout : ${TIMEOUT_SECS}s"
+echo "Timeout : ${TIMEOUT_SECS}s total (all rounds)"
 echo "Prompt  : ${PROMPT:0:120}..."
 echo "==================="
 
@@ -249,7 +250,7 @@ write_vibe_script() {
     # Vibe, so a killed run left no export, no tokens, no diagnosis (verified).
     # The obsolete --legacy-harness/--experimental-harness flags are gone in Vibe 3.
     printf 'exec vibe --agent %q %s %s -p "$PROMPT_CONTENT" --trust --max-turns %q --time-limit %q --output-dir %q --output streaming --workdir %q\n' \
-      "$VIBE_AGENT_FLAG" "$_resume" "$_ro" "$MAX_TURNS" "$TIMEOUT_SECS" "$3" "$WORKDIR"
+      "$VIBE_AGENT_FLAG" "$_resume" "$_ro" "$MAX_TURNS" "$ROUND_LIMIT" "$3" "$WORKDIR"
   } > "$VIBE_SCRIPT"
   chmod +x "$VIBE_SCRIPT"
 }
@@ -257,10 +258,9 @@ write_vibe_script() {
 # Pseudo-TTY for vibe via python pty.spawn (works without a parent TTY, unlike `script`).
 SCRIPT_CMD=(python3 -c 'import pty,sys,os; sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))' "$VIBE_SCRIPT")
 
-# Outer backstop only: Vibe's own --time-limit fires first.
-BACKSTOP_SECS=$(( TIMEOUT_SECS + 120 ))
-
 run_round() {
+# Outer backstop only: Vibe's own --time-limit (ROUND_LIMIT) fires first.
+BACKSTOP_SECS=$(( ROUND_LIMIT + 60 ))
 timeout -k 15 "$BACKSTOP_SECS" "${SCRIPT_CMD[@]}" | python3 -c "
 import sys, json, re, os
 
@@ -522,6 +522,13 @@ while :; do
     INFRA_RETRIED=1; NEXT="model API failed mid-run — resuming the same session once"
   fi
   [ -z "$NEXT" ] && break
+  # Continuation rounds only get what is left of the single total budget.
+  ROUND_LIMIT=$(( TIMEOUT_SECS - ($(date +%s) - RUN_START) ))
+  if [ "$ROUND_LIMIT" -lt 60 ]; then
+    echo ""
+    echo "=== NO AUTO-CONTINUE: total time budget (${TIMEOUT_SECS}s) spent ==="
+    break
+  fi
   ROUND=$((ROUND + 1))
   echo ""
   echo "=== AUTO-CONTINUE: $NEXT ==="

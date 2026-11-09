@@ -201,7 +201,7 @@ VERIFY: grep for "def extract_labels" in app.py and confirm it exists.
 | `prompt`       | —        | Self-contained task description                 |
 | `max-turns`    | `10`     | Model calls per round — hard cap at 12, never more |
 | `agent`        | *(none)* | See agent table below                           |
-| `timeout-secs` | `180`    | Time budget per round, passed to Vibe as `--time-limit`. **Floored at turns × 90 s** (measured p90 per model call on glm-5-3) — a lower value is raised with a NOTICE |
+| `timeout-secs` | `300`    | **Total** wall-clock budget of the whole delegation, auto-continue rounds included; never raised. Passed to Vibe as `--time-limit` (the remaining budget on continuation rounds), so a timeout stops cleanly with its export. Measured on 19 successful Vibe 3 runs: p50 95 s, max 386 s. Raise to ~420 only for a large single-file generation |
 | `--resume SID` | *(none)* | Continue an earlier session (keeps its context, re-reads nothing). The id is printed on every partial run |
 | `--continue-rounds N` / `--no-continue` | `2` | Extra rounds auto-run on the **same session** when Vibe stops on its turn limit |
 | `--require STR` | *(none)* | Repeatable. Abort before launch if STR is absent in the workdir — pass the `search_replace` anchor here |
@@ -249,7 +249,7 @@ The script prints live:
 Workdir : /path/to/project
 Agent   : default
 Turns   : 10
-Timeout : 180s
+Timeout : 300s
 Prompt  : Stack: Python/Flask. File: app.py ...
 ===================
   [read]  app.py
