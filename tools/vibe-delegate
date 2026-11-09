@@ -40,6 +40,14 @@ while [ $# -gt 0 ]; do
       if [ $# -lt 2 ]; then echo "ERROR: --require needs a string argument" >&2; exit 2; fi
       REQUIRES+=("$2"); shift 2 ;;
     --verbose) VERBOSE=1; shift ;;
+    --resume)
+      # Continue an earlier Vibe session (its id is printed on every partial run).
+      if [ $# -lt 2 ]; then echo "ERROR: --resume needs a session id" >&2; exit 2; fi
+      RESUME_SESSION="$2"; shift 2 ;;
+    --continue-rounds)
+      if [ $# -lt 2 ]; then echo "ERROR: --continue-rounds needs a number" >&2; exit 2; fi
+      CONTINUE_ROUNDS="$2"; shift 2 ;;
+    --no-continue) CONTINUE_ROUNDS=0; shift ;;
     *) POSITIONAL+=("$1"); shift ;;
   esac
 done
@@ -58,6 +66,36 @@ TIMEOUT_SECS="${5:-180}"
 if [ "$MAX_TURNS" -gt 12 ] 2>/dev/null; then
   echo "WARNING: max-turns $MAX_TURNS exceeds the hard cap of 12 — clamping to 12. Decompose the task into sequential runs instead of raising this." >&2
   MAX_TURNS=12
+fi
+
+case "$MAX_TURNS" in ''|*[!0-9]*) echo "ERROR: max-turns '$MAX_TURNS' is not a number" >&2; exit 2 ;; esac
+case "$TIMEOUT_SECS" in ''|*[!0-9]*) echo "ERROR: timeout-secs '$TIMEOUT_SECS' is not a number" >&2; exit 2 ;; esac
+CONTINUE_ROUNDS="${CONTINUE_ROUNDS:-2}"
+case "$CONTINUE_ROUNDS" in ''|*[!0-9]*) echo "ERROR: --continue-rounds '$CONTINUE_ROUNDS' is not a number" >&2; exit 2 ;; esac
+RESUME_SESSION="${RESUME_SESSION:-}"
+
+# Agent mapping (2026-11-09). Vibe 3.0 (installed 2026-10-29) has only four primary
+# agents: ask | accept-edits | smart-approve | auto-approve. `plan`, `default`,
+# `lean` were removed, and ~/.vibe/agents/*.toml are subagents: passing any of
+# them dies at once with "Agent 'plan' not found" (exit 2). Read-only names now
+# map to auto-approve with the write tools disabled (verified: writes refused).
+READONLY=0
+VIBE_AGENT_FLAG=""
+case "$AGENT" in
+  plan|explore|readonly|planner|architect|code-reviewer|code-architect|code-explorer)
+    READONLY=1; VIBE_AGENT_FLAG="auto-approve" ;;
+  ""|default|lean|auto-approve) VIBE_AGENT_FLAG="auto-approve" ;;
+  *) VIBE_AGENT_FLAG="$AGENT" ;;
+esac
+
+# Time budget floor (2026-11-09). Measured on 30 Vibe 3 sessions (glm-5-3): one
+# model call takes p50 13 s, p90 93 s (tool execution included). Callers passed
+# 180-600 s for 8-12 turns, so the run was killed mid-work: 4 of the 12 failures
+# since the Vibe 3 upgrade. Floor = 90 s per turn.
+MIN_TIMEOUT=$(( MAX_TURNS * 90 ))
+if [ "$TIMEOUT_SECS" -lt "$MIN_TIMEOUT" ]; then
+  echo "NOTICE: timeout ${TIMEOUT_SECS}s is below ${MAX_TURNS} turns x 90 s (measured p90 per call) — raised to ${MIN_TIMEOUT}s." >&2
+  TIMEOUT_SECS=$MIN_TIMEOUT
 fi
 
 if [ ! -d "$WORKDIR" ]; then
@@ -146,6 +184,11 @@ fi
 PROMPT="$PROMPT
 
 RUN BUDGET: you have $MAX_TURNS turns in total. For in-place changes use the edit tool (to batch many similar edits in one turn you may call tools.file_system.edit from run_typescript). Keep your last turn for a short final summary of what you changed."
+if [ "$READONLY" = 1 ]; then
+  PROMPT="$PROMPT
+
+READ-ONLY RUN: do not modify, create or delete any file (file write tools are disabled; do not use bash to write either). Report your findings as your final answer."
+fi
 AUDIT_RC=0
 
 # Sentinel file for mtime-based change detection. `git diff --name-only` is binary
@@ -158,7 +201,8 @@ SENTINEL=$(mktemp /tmp/vibe-sentinel-XXXXXX)
 
 echo "=== VIBE START ==="
 echo "Workdir : $WORKDIR"
-echo "Agent   : ${AGENT:-auto-approve}"
+echo "Agent   : ${AGENT:-auto-approve}$([ "$READONLY" = 1 ] && echo " (read-only: auto-approve, write tools disabled)")"
+[ -n "$RESUME_SESSION" ] && echo "Resume  : $RESUME_SESSION"
 echo "Model   : ${VIBE_MODEL_OVERRIDE:-(config default)}"
 echo "Turns   : $MAX_TURNS"
 echo "Timeout : ${TIMEOUT_SECS}s"
@@ -183,32 +227,41 @@ export DELEGATE_STATS_FILE
 DELEGATE_REASON_FILE=$(mktemp /tmp/delegate-reason-XXXXXX.txt)
 export DELEGATE_REASON_FILE
 
-trap 'rm -f "$VIBE_SCRIPT" "$PROMPT_FILE" "$DELEGATE_STATS_FILE" "$DELEGATE_REASON_FILE" "$SENTINEL"' EXIT
+# Per-run dir: one --output-dir per round. Vibe 3 writes export.json there on
+# EVERY exit (outcome, stop_reason, session_id, usage): the ground truth that
+# replaces guessing the session from mtimes.
+RUN_DIR=$(mktemp -d /tmp/vibe-run-XXXXXX)
 
-{
-  echo '#!/usr/bin/env bash'
-  echo "PROMPT_CONTENT=$(printf '%q' "$(cat "$PROMPT_FILE")")"
-  # auto-approve is required for non-interactive tool execution (file writes, python3, etc.)
-  # Explicit --agent overrides this. Valid primary agents (vibe 2026-08):
-  #   default | plan | accept-edits | auto-approve | lean
-  # 'explore' exists but is a SUBAGENT — --agent rejects it outright.
-  _VIBE_AGENT="${AGENT:-auto-approve}"
-  # VIBE_HARNESS=legacy|unified forces a backend; unset = Vibe's own rollout
-  # choice (GrowthBook rollout; unified for enrolled installs).
-  case "${VIBE_HARNESS:-}" in
-    legacy)  _HARNESS_FLAG="--legacy-harness" ;;
-    unified) _HARNESS_FLAG="--experimental-harness" ;;
-    *)       _HARNESS_FLAG="" ;;
-  esac
-  printf 'exec vibe %s --agent %q -p "$PROMPT_CONTENT" --trust --max-turns %q --output streaming --workdir %q\n' \
-    "$_HARNESS_FLAG" "$_VIBE_AGENT" "$MAX_TURNS" "$WORKDIR"
-} > "$VIBE_SCRIPT"
-chmod +x "$VIBE_SCRIPT"
+trap 'rm -rf "$VIBE_SCRIPT" "$PROMPT_FILE" "$DELEGATE_STATS_FILE" "$DELEGATE_REASON_FILE" "$SENTINEL" "$RUN_DIR"' EXIT
+
+# write_vibe_script <prompt-file> <resume-session-id or ""> <output-dir>
+write_vibe_script() {
+  local _resume=""
+  [ -n "$2" ] && _resume="--resume $(printf '%q' "$2")"
+  local _ro=""
+  # Tool names verified on Vibe 3.0.3 (2026-11-09): disabling these refuses writes.
+  [ "$READONLY" = 1 ] && _ro="--disabled-tools write_file --disabled-tools search_replace --disabled-tools edit"
+  {
+    echo '#!/usr/bin/env bash'
+    echo "PROMPT_CONTENT=$(printf '%q' "$(cat "$1")")"
+    # --time-limit: Vibe stops itself cleanly (exit 3, outcome deadline) and still
+    # writes the export. The outer `timeout` only SIGTERMs the pty wrapper, never
+    # Vibe, so a killed run left no export, no tokens, no diagnosis (verified).
+    # The obsolete --legacy-harness/--experimental-harness flags are gone in Vibe 3.
+    printf 'exec vibe --agent %q %s %s -p "$PROMPT_CONTENT" --trust --max-turns %q --time-limit %q --output-dir %q --output streaming --workdir %q\n' \
+      "$VIBE_AGENT_FLAG" "$_resume" "$_ro" "$MAX_TURNS" "$TIMEOUT_SECS" "$3" "$WORKDIR"
+  } > "$VIBE_SCRIPT"
+  chmod +x "$VIBE_SCRIPT"
+}
 
 # Pseudo-TTY for vibe via python pty.spawn (works without a parent TTY, unlike `script`).
 SCRIPT_CMD=(python3 -c 'import pty,sys,os; sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))' "$VIBE_SCRIPT")
 
-timeout "$TIMEOUT_SECS" "${SCRIPT_CMD[@]}" | python3 -c "
+# Outer backstop only: Vibe's own --time-limit fires first.
+BACKSTOP_SECS=$(( TIMEOUT_SECS + 120 ))
+
+run_round() {
+timeout -k 15 "$BACKSTOP_SECS" "${SCRIPT_CMD[@]}" | python3 -c "
 import sys, json, re, os
 
 ANSI_RE = re.compile(r'\x1b\[[0-9;]*[mABCDEFGHJKSTfhilmnprsu]|\x1b\([AB]|\x0f|\x0e')
@@ -390,13 +443,127 @@ if denied_count:
 # Write partial stats so the token block can merge into it.
 _sf = os.environ.get('DELEGATE_STATS_FILE', '')
 if _sf:
+    # Accumulate across auto-continue rounds instead of overwriting.
+    try:
+        prev = json.load(open(_sf))
+    except Exception:
+        prev = {}
     try:
         with open(_sf, 'w') as _f:
-            json.dump({'tool_calls': tools_called, 'warn_count': warn_count, 'search_replace_fails': sr_fails, 'sandbox_blocked': sandbox_blocked, 'denied_count': denied_count}, _f)
+            json.dump({'tool_calls': prev.get('tool_calls', 0) + tools_called,
+                       'warn_count': prev.get('warn_count', 0) + warn_count,
+                       'search_replace_fails': prev.get('search_replace_fails', 0) + sr_fails,
+                       'sandbox_blocked': bool(prev.get('sandbox_blocked')) or sandbox_blocked,
+                       'denied_count': prev.get('denied_count', 0) + denied_count}, _f)
     except Exception:
         pass
 "
-VIBE_EXIT=${PIPESTATUS[0]}
+return "${PIPESTATUS[0]}"
+}
+
+# read_export <dir> → prints "outcome|session_id|steps|error message" ("" if no export).
+read_export() {
+  python3 - "$1/export.json" << 'PYEXP'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    print(''); sys.exit(0)
+err = ((d.get('error') or {}).get('message') or '').replace('|', '/').replace('\n', ' ')
+print(f"{d.get('outcome') or ''}|{d.get('session_id') or ''}|{d.get('steps') or 0}|{err[:200]}")
+PYEXP
+}
+
+# ── Rounds: run, then auto-continue the SAME session when Vibe stopped on its
+# turn limit (or a transient API failure). Measured 2026-11-09: since the Vibe 3
+# upgrade, 7 of 12 failed runs were exit 3 = turn_limit (12 model calls of 12),
+# previously logged as a crash. A resumed session keeps its context, so it does
+# not re-read anything: verified, a turn-limited run resumed with
+# `--resume <id> -p continue` finished the task (5/5 files) in 3 more calls.
+# A resumed session's runtime-state already lists the earlier run's actions; the
+# WRITE AUDIT must skip them, or their files (untouched in THIS run) would show
+# as MISMATCH and fail the run.
+AUDIT_SKIP_ACTIONS=0
+if [ -n "$RESUME_SESSION" ]; then
+  AUDIT_SKIP_ACTIONS=$(python3 - "${VIBE_HOME:-$HOME/.vibe}/logs/session/unified/$RESUME_SESSION" << 'PYSKIP'
+import json, sys
+s = sys.argv[1]
+try:
+    gen = json.load(open(s + "/CURRENT"))["generation"]
+    print(len(json.load(open(f"{s}/generations/{gen}/runtime-state.json")).get("actions") or []))
+except (OSError, ValueError, KeyError):
+    print(0)
+PYSKIP
+)
+fi
+export AUDIT_SKIP_ACTIONS
+
+ROUND=0
+CONTINUED=0
+INFRA_RETRIED=0
+CUR_PROMPT_FILE="$PROMPT_FILE"
+CUR_SID="$RESUME_SESSION"
+OUTCOMES=""
+while :; do
+  OUT_DIR="$RUN_DIR/round-$ROUND"
+  write_vibe_script "$CUR_PROMPT_FILE" "$CUR_SID" "$OUT_DIR"
+  run_round
+  VIBE_EXIT=$?
+  IFS='|' read -r R_OUTCOME R_SID R_STEPS R_ERR <<< "$(read_export "$OUT_DIR")"
+  [ -n "$R_SID" ] && CUR_SID="$R_SID"
+  OUTCOMES="$OUTCOMES ${R_OUTCOME:-noexport(exit $VIBE_EXIT)}"
+  [ -n "$R_ERR" ] && echo "  [VIBE ERROR] $R_ERR"
+  NEXT=""
+  if [ "$R_OUTCOME" = "turn_limit" ] && [ "$CONTINUED" -lt "$CONTINUE_ROUNDS" ] && [ -n "$CUR_SID" ]; then
+    CONTINUED=$((CONTINUED + 1)); NEXT="turn limit reached — continuing the same session ($CONTINUED/$CONTINUE_ROUNDS)"
+  elif [ "$R_OUTCOME" = "infrastructure_failure" ] && [ "${R_STEPS:-0}" -gt 0 ] && [ "$INFRA_RETRIED" -eq 0 ] && [ -n "$CUR_SID" ]; then
+    # steps > 0: the agent did run, so this is the model API failing mid-run
+    # (e.g. IncompleteProviderStream), not a bad flag/agent (those have 0 steps).
+    INFRA_RETRIED=1; NEXT="model API failed mid-run — resuming the same session once"
+  fi
+  [ -z "$NEXT" ] && break
+  ROUND=$((ROUND + 1))
+  echo ""
+  echo "=== AUTO-CONTINUE: $NEXT ==="
+  CUR_PROMPT_FILE="$RUN_DIR/continue-prompt.txt"
+  printf '%s' "You stopped before finishing (turn limit or a model API error). Continue the ORIGINAL task exactly where you stopped. Do not redo or re-read work that is already done; check the files you already changed only if you need to. RUN BUDGET: $MAX_TURNS more turns. Keep your last turn for a short final summary of everything you changed across the whole task." > "$CUR_PROMPT_FILE"
+done
+FINAL_OUTCOME="$R_OUTCOME"
+FINAL_SID="$CUR_SID"
+
+# Aggregate the exports of all rounds into the stats file (tokens are per round).
+python3 - "$RUN_DIR" "$DELEGATE_STATS_FILE" "$CONTINUED" << 'PYAGG'
+import glob, json, sys
+run_dir, sf, continued = sys.argv[1], sys.argv[2], int(sys.argv[3])
+exps = []
+for p in sorted(glob.glob(run_dir + '/round-*/export.json'), key=lambda p: int(p.split('round-')[1].split('/')[0])):
+    try:
+        exps.append(json.load(open(p)))
+    except (OSError, ValueError):
+        pass
+if not exps:
+    sys.exit(0)
+try:
+    st = json.load(open(sf))
+except (OSError, ValueError):
+    st = {}
+u_in = sum(((e.get('usage') or {}).get('input_tokens') or 0) for e in exps)
+u_out = sum(((e.get('usage') or {}).get('output_tokens') or 0) for e in exps)
+last = exps[-1]
+st.update({
+    'vibe_outcome': last.get('outcome'),
+    'vibe_stop_reason': last.get('stop_reason'),
+    'vibe_error': ((last.get('error') or {}).get('message') or '')[:300],
+    'vibe_steps': sum((e.get('steps') or 0) for e in exps),
+    'vibe_rounds': len(exps),
+    'auto_continued': continued,
+    'round_outcomes': [e.get('outcome') for e in exps],
+    'session_id': last.get('session_id'),
+    'export_tokens_in': u_in,
+    'export_tokens_out': u_out,
+})
+json.dump(st, open(sf, 'w'))
+PYAGG
 
 # ── Real Mistral token counts from session log ─────────────────────────────────
 VIBE_HOME="${VIBE_HOME:-$HOME/.vibe}"
@@ -416,7 +583,12 @@ VIBE_HOME="${VIBE_HOME:-$HOME/.vibe}"
 # started after this run began (start_time) and (2) belong to this workdir
 # (origin_directory / environment.working_directory). Legacy meta.json without a
 # directory is kept as a candidate.
-SESSION_LOG=$(find "$VIBE_HOME/logs/session" -mindepth 2 -maxdepth 3 -name meta.json -newer "$SENTINEL" 2>/dev/null \
+SESSION_LOG=""
+# Vibe 3: the export names the session exactly — no heuristic needed.
+if [ -n "$FINAL_SID" ] && [ -f "$VIBE_HOME/logs/session/unified/$FINAL_SID/meta.json" ]; then
+  SESSION_LOG="$VIBE_HOME/logs/session/unified/$FINAL_SID/meta.json"
+fi
+[ -z "$SESSION_LOG" ] && SESSION_LOG=$(find "$VIBE_HOME/logs/session" -mindepth 2 -maxdepth 3 -name meta.json -newer "$SENTINEL" 2>/dev/null \
   | RUN_WORKDIR="$WORKDIR" RUN_SENTINEL="$SENTINEL" python3 -c "
 import sys, os, json, datetime
 wd = os.path.realpath(os.environ['RUN_WORKDIR'])
@@ -490,6 +662,14 @@ try:
                             and completions >= int('$MAX_TURNS' or 0) > 0)
         except Exception:
             pass
+    # Vibe 3 export usage (summed over auto-continue rounds) is exact for THIS
+    # run; the session totals above would also count an earlier --resume'd run.
+    try:
+        _ex = json.load(open(os.environ.get('DELEGATE_STATS_FILE', '')))
+        if _ex.get('export_tokens_in') or _ex.get('export_tokens_out'):
+            session_in, session_out = _ex['export_tokens_in'], _ex['export_tokens_out']
+    except Exception:
+        pass
     # Read per-model pricing from ~/.vibe/config.toml (fallback: Mistral Medium 3.5 rates)
     input_price, output_price = 1.5, 7.5
     try:
@@ -596,9 +776,9 @@ fi
 
 echo ""
 if [ "$VIBE_EXIT" -eq 124 ]; then
-  echo "=== VIBE TIMEOUT (>${TIMEOUT_SECS}s) — killed ==="
+  echo "=== VIBE KILLED by backstop (>${BACKSTOP_SECS}s, Vibe ignored its own --time-limit) ==="
 else
-  echo "=== VIBE DONE (exit: $VIBE_EXIT) ==="
+  echo "=== VIBE DONE (exit: $VIBE_EXIT, outcome: ${FINAL_OUTCOME:-unknown}, rounds:${OUTCOMES}) ==="
 fi
 
 # ── Post-run syntax checks — language-agnostic ────────────────────────────────
@@ -749,7 +929,7 @@ GIT_AFTER=$(git rev-parse HEAD 2>/dev/null || echo "no-git")
 # tool calls named file_system.search_replace / file_system.write_file
 # (input: {file_path, content:[{old_str,new_str}]} or {file_path, content:str}).
 if [ -n "$SESSION_LOG" ] && [ -d "$(dirname "$SESSION_LOG")/journal" ]; then
-  CHANGED_LIST="$CHANGED" python3 - "$(dirname "$SESSION_LOG")" << 'PYAUDIT' || AUDIT_RC=$?
+  RUN_SENTINEL="$SENTINEL" CHANGED_LIST="$CHANGED" python3 - "$(dirname "$SESSION_LOG")" << 'PYAUDIT' || AUDIT_RC=$?
 import glob, hashlib, json, os, sys
 
 sess = sys.argv[1]
@@ -761,11 +941,23 @@ def rel(path):
     path = path or ""
     return os.path.relpath(path) if os.path.isabs(path) else path
 
-def walk(o):
+# A --resume'd session's journal also holds the earlier runs' writes, whose files
+# are untouched in THIS run: they read as MISMATCH and failed the run. Journal
+# entries carry createdAt (ms epoch) — keep only those from this run onward.
+try:
+    T0_MS = (os.path.getmtime(os.environ["RUN_SENTINEL"]) - 5) * 1000
+except (KeyError, OSError):
+    T0_MS = 0
+
+def walk(o, ts=None):
     if isinstance(o, dict):
+        if isinstance(o.get("createdAt"), (int, float)):
+            ts = o["createdAt"]
         tn = o.get("toolName") or ""
         inp = o.get("input")
-        if isinstance(inp, dict) and (tn.endswith("search_replace") or tn.endswith("write_file")):
+        if ts is not None and ts < T0_MS:
+            pass  # written by an earlier run of this session
+        elif isinstance(inp, dict) and (tn.endswith("search_replace") or tn.endswith("write_file")):
             c = inp.get("content")
             body = json.dumps(c, sort_keys=True) if not isinstance(c, str) else c
             # search_replace journals the target as file_path, write_file as path.
@@ -776,10 +968,10 @@ def walk(o):
                 size = len(c) if isinstance(c, str) else sum(len(e.get("new_str", "")) for e in (c or []) if isinstance(e, dict))
                 attempts.append((tn.split(".")[-1], rel(target), size))
         for v in o.values():
-            walk(v)
+            walk(v, ts)
     elif isinstance(o, list):
         for v in o:
-            walk(v)
+            walk(v, ts)
 
 for f in sorted(glob.glob(sess + "/journal/*.jsonl")):
     for line in open(f, errors="replace"):
@@ -800,7 +992,8 @@ calls = []  # (tool, path, succeeded, error message)
 try:
     gen = json.load(open(sess + "/CURRENT"))["generation"]
     rt = json.load(open(f"{sess}/generations/{gen}/runtime-state.json"))
-    for a in rt.get("actions") or []:
+    _skip = int(os.environ.get("AUDIT_SKIP_ACTIONS", "0") or 0)
+    for a in (rt.get("actions") or [])[_skip:]:
         call = (a.get("request") or {}).get("call") or {}
         name = call.get("name") or ""
         if not (name.endswith("search_replace") or name.endswith("write_file")):
@@ -972,15 +1165,33 @@ entry['cost_claude_eq'] = round((ti * 3.0 + to * 15.0) / 1_000_000, 6)
 # `plan` review before 2026-08-02). 'chat' is deliberately NOT here: it is
 # absent from BUILTIN_AGENTS in 2.22.0 and dropped from the enum in 2.24.0,
 # so --agent chat never reaches this code at all.
-_readonly_agents = ('plan', 'explore', 'code-reviewer', 'code-architect', 'planner')
+_readonly_agents = ('plan', 'explore', 'readonly', 'code-reviewer', 'code-architect', 'code-explorer', 'planner', 'architect')
 _tok_out  = entry.get('tokens_out', 0) or 0
 _tc       = entry.get('tool_calls', 0) or 0
 _fc       = entry.get('files_changed', 0) or 0
 _exit     = entry.get('exit_code', 0)
 _agent    = entry.get('agent', 'default')
+# Vibe 3 export outcome: the run's own account of how it ended (run_export.py
+# RunOutcome). Before 2026-11-09 every non-zero exit was logged 'exit_error',
+# so "out of turns" (exit 3), "API down" (exit 2) and "bad flag" (exit 1) all
+# read as a crash.
+_vo       = stats.get('vibe_outcome') or ''
 
 if entry.get('timed_out'):
     _reason = 'timeout'
+elif _vo in ('deadline', 'terminated'):
+    _reason = 'timeout'
+elif _vo == 'turn_limit':
+    _reason = 'turn_cap'
+elif _vo in ('token_limit', 'price_limit', 'length'):
+    _reason = 'budget_limit'
+elif _vo == 'refusal':
+    _reason = 'refusal'
+elif _vo == 'infrastructure_failure':
+    # 0 steps = Vibe never ran the agent: a bad agent name/flag/config, not the API.
+    _reason = 'infra_error' if stats.get('vibe_steps') else 'usage_error'
+elif _vo in ('usage_error', 'config_error'):
+    _reason = 'usage_error'
 elif _exit not in (0, 124):
     # A sandbox "Tool execution not permitted" message inflates exit to 1 even when
     # the files were actually written (seen 2026-06-17, run with fc=2 still logged
@@ -1017,7 +1228,8 @@ elif _fc == 0 and _exit == 0 and _agent not in _readonly_agents:
 elif os.environ.get('DELEGATE_AUDIT_MISMATCH') and _agent not in _readonly_agents:
     # A write the journal recorded never reached disk (see WRITE AUDIT above).
     _reason = 'write_mismatch'
-elif stats.get('turn_cap_hit') and _agent not in _readonly_agents:
+elif stats.get('turn_cap_hit') and not _vo and _agent not in _readonly_agents:
+    # Legacy heuristic, only when there is no Vibe 3 export to say 'finished'.
     # Files changed, but Vibe ran out of turns before its final answer: the
     # task is likely PARTIAL. Before this check such runs were logged as 'ok'.
     _reason = 'turn_cap'
@@ -1053,11 +1265,21 @@ _FAIL_HINTS = {
     'syntax_error':      'files written but syntax check failed',
     'sr_fail':           'search_replace did not match (anchor/UTF-8?)',
     'exit_error':        'vibe exited non-zero',
-    'turn_cap':          'max-turns cap hit before Vibe finished — task likely PARTIAL; check git diff for what is missing',
-    'timeout':           'wall-clock timeout',
+    'turn_cap':          'out of turns even after auto-continue — task PARTIAL; split it, or resume (below)',
+    'timeout':           'time budget used up before Vibe finished — task PARTIAL',
+    'budget_limit':      'token/price/length limit hit — task PARTIAL',
+    'refusal':           'the model refused the task',
+    'infra_error':       'the model API failed mid-run, even after one automatic resume',
+    'usage_error':       'Vibe refused to start (bad agent name, flag or config) — fix the argument, do NOT retry verbatim',
 }
+_sid = stats.get('session_id') or ''
+_verr = stats.get('vibe_error') or ''
 if _reason in _FAIL_HINTS:
     print(f'=== RESULT: FAILED [{_reason}] — {_FAIL_HINTS[_reason]}. Do NOT report success; inspect git diff. ===')
+    if _verr:
+        print(f'    vibe error: {_verr}')
+    if _sid and _reason in ('turn_cap', 'timeout', 'budget_limit', 'infra_error'):
+        print(f'    resume this session (keeps its context): vibe-delegate <workdir> "continue" <turns> --resume {_sid}')
 elif _agent in _readonly_agents:
     print('=== RESULT: READ-ONLY run (no writes expected) ===')
 else:
@@ -1076,7 +1298,7 @@ PYLOG
 # Keeps `vibe-delegate ... && next-step` chains from sailing past a failed run.
 FINAL_REASON=$(cat "$DELEGATE_REASON_FILE" 2>/dev/null)
 case "$FINAL_REASON" in
-  wrote_nothing|silent_exit|near_empty|narrated_no_tools|denied|write_mismatch|syntax_error|sr_fail|turn_cap)
+  wrote_nothing|silent_exit|near_empty|narrated_no_tools|denied|write_mismatch|syntax_error|sr_fail|turn_cap|timeout|budget_limit|refusal|infra_error|usage_error)
     if [ "$VIBE_EXIT" -eq 0 ]; then exit 3; fi ;;
 esac
 exit $VIBE_EXIT

@@ -214,8 +214,18 @@ def show_by_project(runs):
 # ── Failure classification ────────────────────────────────────────────────────
 
 FAIL_INFO = {
-    'timeout':       ('Context saturated or task too large',
-                      'Decompose into sub-tasks; reduce --max-turns to ≤8'),
+    'timeout':       ('Time budget used up mid-task (glm-5-3: p90 ~93 s per model call)',
+                      'vibe-delegate now floors the budget at turns x 90 s; resume with --resume <session>'),
+    'limit_stop':    ('Vibe 3 exit 3 — stopped on a limit (all 7 checked cases: turn limit)',
+                      'Since 2026-11-09 auto-continued; split the task or --resume <session>'),
+    'infra_error':   ('Model API failed mid-run (e.g. IncompleteProviderStream)',
+                      'Transient; vibe-delegate now resumes the session once automatically'),
+    'usage_error':   ('Vibe refused to start — bad agent name, flag or config',
+                      'Fix the argument (Vibe 3 agents: ask, accept-edits, smart-approve, auto-approve; plan = read-only alias)'),
+    'budget_limit':  ('Token/price/length limit hit',
+                      'Split the task'),
+    'refusal':       ('The model refused the task',
+                      'Rephrase or switch model'),
     'exit_err':      ('Vibe verification failed or crashed',
                       'Read git diff; understand partial work before relaunching'),
     'exit_error':    ('Vibe verification failed or crashed',
@@ -275,6 +285,14 @@ def classify_fail(r):
     """Return primary failure type code, or None if run was clean."""
     # Use logged failure_reason when available (new log format)
     fr = r.get('failure_reason')
+    # Runs logged before 2026-11-09 lumped every Vibe 3 non-zero exit into
+    # exit_error; Vibe 3 exit codes are defined (run_export.py RunOutcome):
+    # 3 = stopped on a limit, 2 = infrastructure failure.
+    if fr == 'exit_error' and r.get('delegate', 'vibe') == 'vibe':
+        if r.get('exit_code') == 3:
+            return 'limit_stop'
+        if r.get('exit_code') == 2:
+            return 'infra_error'
     if fr:
         return _REASON_DISPLAY.get(fr, fr) if fr != 'ok' else None
     # Legacy: derive from individual flag fields

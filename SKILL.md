@@ -199,9 +199,11 @@ VERIFY: grep for "def extract_labels" in app.py and confirm it exists.
 |----------------|----------|-------------------------------------------------|
 | `workdir`      | —        | Absolute path, must exist                       |
 | `prompt`       | —        | Self-contained task description                 |
-| `max-turns`    | `10`     | Mistral turn limit — hard cap at 12, never more |
+| `max-turns`    | `10`     | Model calls per round — hard cap at 12, never more |
 | `agent`        | *(none)* | See agent table below                           |
-| `timeout-secs` | `180`    | Wall-clock kill timer                           |
+| `timeout-secs` | `180`    | Time budget per round, passed to Vibe as `--time-limit`. **Floored at turns × 90 s** (measured p90 per model call on glm-5-3) — a lower value is raised with a NOTICE |
+| `--resume SID` | *(none)* | Continue an earlier session (keeps its context, re-reads nothing). The id is printed on every partial run |
+| `--continue-rounds N` / `--no-continue` | `2` | Extra rounds auto-run on the **same session** when Vibe stops on its turn limit |
 | `--require STR` | *(none)* | Repeatable. Abort before launch if STR is absent in the workdir — pass the `search_replace` anchor here |
 | `--with-review N` | *(none)* | After Vibe finishes, Claude reviews the diff and re-delegates fixes up to N times (see Step 8) |
 | `--verbose` | *(off)* | Print per-token-type cost breakdown (input/output tokens × pricing) instead of the compact summary line |
@@ -209,23 +211,18 @@ VERIFY: grep for "def extract_labels" in app.py and confirm it exists.
 
 **Available agents:**
 
-These are Vibe's **built-in** agents. Custom agents can add to this list, but
-nothing outside it is guaranteed to exist — an unknown name aborts the run in
-~1.5s with `Error: Agent 'X' not found`.
+Vibe 3.0 (installed 2026-10-29) has only four primary agents: `ask`,
+`accept-edits`, `smart-approve`, `auto-approve`. `plan`, `default`, `lean` were
+removed and `~/.vibe/agents/*.toml` are subagents — passed straight to Vibe they
+die at once with `Agent 'X' not found`. vibe-delegate maps the names below:
 
-| Agent | Type | Use |
-|-------|------|-----|
-| *(default → `auto-approve`)* | agent | General implementation — all tools run without approval |
-| `plan` | agent | **Read-only** — reviews, analysis, planning. The right pick for any "look, don't touch" task |
-| `default` | agent | Standard loop, prompts for approval (needs a TTY — avoid headless) |
-| `accept-edits` | agent | Auto-approves edits but not other tools |
-| `lean` | agent | Reduced tool surface |
-| `explore` | **subagent** | Read-only exploration — **cannot** be passed to `--agent`; usable only as a sub-agent from within a run |
+| Name you pass | What runs | Use |
+|---------------|-----------|-----|
+| *(none)*, `default`, `lean`, `auto-approve` | `auto-approve` | General implementation — all tools run without approval |
+| `plan` (also `explore`, `readonly`, `planner`, `code-reviewer`, …) | `auto-approve` + `--disabled-tools write_file/search_replace/edit` + READ-ONLY prompt note | **Read-only** — reviews, analysis, planning |
+| `accept-edits`, `smart-approve`, `ask` | passed through | `ask` prompts for approval: unusable headless |
 
-> ⚠️ `code-reviewer`, `planner`, and `code-architect` were listed here until
-> 2026-08-02 but **do not exist** in current Vibe. Use `plan` for review and
-> planning work. Verify against `BUILTIN_AGENTS` in
-> `vibe/core/agents/models.py` if a name is ever in doubt.
+Verify against `vibe/core/agents/models.py` (`BuiltinAgentName`) if a name is ever in doubt.
 
 **Read-only runs write nothing by design** — that is success, not `WROTE_NOTHING`.
 Do not apply the Step 6 retry/ghostwrite ladder to a `plan`/`explore` run.
@@ -275,13 +272,15 @@ Claude Sonnet 4.6 eq: same tokens would cost ~$0.0168  (ratio x2.0)
 **Verdict lines (since 2026-09-30) — read these before anything else:**
 
 - Last line is `=== RESULT: OK ... ===` (or `OK (UNVERIFIED)` when no session journal was found — read git diff), or `=== RESULT: FAILED [reason] ... ===` (or `READ-ONLY`). `FAILED` means nothing usable landed, whatever stdout narrated: never report success, run `git diff`.
-- Exit code **3** = vibe exited 0 but the run failed (`wrote_nothing`, `write_mismatch`, `syntax_error`, `sr_fail`, ...). A `vibe-delegate ... && next` chain now stops there.
-- `FAILED [turn_cap]` (since 2026-10-01) = Vibe used every `--max-turns` model call and never gave a final answer. Vibe 2.25 exits **0** on this, so before the check it was logged `ok`. Files may be changed but the task is likely partial: diff against the task list, then delegate only the missing part.
+- **Vibe 3 outcome (since 2026-11-09).** Each round runs with `--output-dir`; Vibe writes `export.json` (outcome, stop reason, session id, exact token usage) on every exit. vibe-delegate classifies from it, not from guesses. Vibe 3 exit codes: `0` finished, `1` usage/config error, `2` infrastructure (model API, or an unknown agent), `3` stopped on a limit (turns, time, tokens, refusal). Before this, exit 3 = "out of turns" was logged as `exit_error` and read as a crash.
+- **Auto-continue.** When a round ends on `turn_limit`, the script resumes the **same session** (`--resume <id>`) for up to 2 more rounds of `max-turns` each (`=== AUTO-CONTINUE ===`). A mid-run API failure (`IncompleteProviderStream`) is resumed once. Verified 2026-11-09: a turn-limited run, resumed, finished its task.
+- `FAILED [turn_cap]` = still out of turns after the auto-continue rounds. `FAILED [timeout]` = the time budget ran out (Vibe stopped itself via `--time-limit`, export intact). Both print `resume this session: vibe-delegate <workdir> "continue" <turns> --resume <id>`. Use that rather than relaunching from zero; or split the task.
+- `FAILED [usage_error]` = Vibe refused to start (bad agent/flag): fix the argument, never retry verbatim. `FAILED [infra_error]` = the model API failed twice.
+- The script's own exit code is non-zero on every FAILED verdict, so a `vibe-delegate ... && next` chain stops there.
 - `=== VIBE FINAL ANSWER ===` (since 2026-10-01) = Vibe's complete closing message, read from the session checkpoint. The `[vibe]` stream lines are cut at 400 chars — quote this block, not them.
 - `=== WRITE AUDIT (journal vs disk) ===` lists every edit/write call with its **own outcome** (`call: ok` / `call: FAILED (reason)`) and the disk state. `MISMATCH` = a successful call that did not land. A failed edit followed by a successful one on the same file is marked `recovered` and does **not** make the run FAILED (it used to, wrongly). `0 write attempts` = Vibe only explored.
 - `[PREFLIGHT] large file(s)` = a file named in the prompt is >40 KB; the harness appended a grep → read offset/limit → edit instruction. Still pass the anchor with `--require`.
 - Every prompt also gets a `RUN BUDGET` line (turn count, "use the edit tool", "keep the last turn for a summary"): Vibe has no other way to know its `--max-turns`.
-- `VIBE_HARNESS=legacy|unified` forces a backend. Benchmarked 2026-10-01: both 4/4 correct; unified faster (19–21 s vs 24–29 s), legacy ~15–30 % fewer tokens. Default (unset) = unified.
 - Sessions live in `~/.vibe/logs/session/unified/<uuid>/{journal,chunks}` (compact JSON; tool `file_system.search_replace`, input `{file_path, content:[{old_str,new_str}]}`). That layout's `meta.json` has no token stats; vibe-delegate reads them from `generations/<CURRENT>/projection-state.json` (`tokenUsage`) and the model from `runtime-state.json`. `0 tokens` / `Model: unknown` on a new run is a bug, not expected.
 
 **Red flags to act on immediately:**
