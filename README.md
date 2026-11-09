@@ -87,6 +87,8 @@ The 26% `exit_error` + `wrote_nothing` share one root cause: `search_replace` an
 | Real cost | $0.67 + ~$18/mo sub | $0 (free tiers) |
 | Models | mistral-medium, deepseek-flash (paid, capable) | free deepseek / mimo / nemotron tiers |
 
+> **Vibe 3 (2026-10-29 onward).** The table above predates Vibe 3. After the upgrade, 12 of 31 runs failed (39 %) and the harness misread most of them (out-of-turns logged as crashes, write audit blind). See [`docs/harness-audit-2026-11-09.md`](docs/harness-audit-2026-11-09.md): causes, fixes, a 24-run benchmark with hidden tests, and how to check the expected drop to ~10-15 %.
+
 Same headline exit-rate, very different profile: `opencode` runs free tiers at zero cost but with high `silent_exit` and timeout rates. Use it for cheap exploration; vibe's paid models are the choice when the edit has to land. Both write to the same log — `/vibe-report --all` compares them.
 
 ---
@@ -281,10 +283,10 @@ Sample output from a real run:
 ```
 === VIBE START ===
 Workdir : /path/to/project
-Agent   : default
+Agent   : auto-approve
 Model   : (config default)
 Turns   : 10
-Timeout : 180s
+Timeout : 300s total (all rounds)
 Prompt  : Stack: Python/Flask. File: app.py ...
 ===================
   [read]  app.py

@@ -61,7 +61,10 @@ Every run appends one JSON entry to `~/.local/share/delegate-runs.jsonl`.
 | `warn_count` | int | `[WARN]` events during the run |
 | `search_replace_fails` | int | `search_replace [FAIL]` events |
 | `wrote_nothing` | bool | `true` if ≥3 tool calls but 0 files changed (backwards compat) |
-| `failure_reason` | string | `ok` \| `silent_exit` \| `near_empty` \| `wrote_nothing` \| `timeout` \| `exit_error` \| `syntax_error` \| `sr_fail` \| `warn_only` |
+| `failure_reason` | string | `ok` \| `ok_resumed_nothing_left` \| `silent_exit` \| `near_empty` \| `narrated_no_tools` \| `wrote_nothing` \| `denied` \| `write_mismatch` \| `timeout` \| `turn_cap` \| `budget_limit` \| `refusal` \| `infra_error` \| `usage_error` \| `exit_error` \| `syntax_error` \| `sr_fail` \| `warn_only` \| `precheck_abort` |
+| `vibe_outcome` | string | Vibe 3 export outcome of the last round (`finished`, `turn_limit`, `deadline`, `infrastructure_failure`, …) |
+| `vibe_rounds` / `auto_continued` | int | Rounds run on the same session / how many were auto-continue rounds |
+| `session_id` | string | Vibe session id — pass to `--resume` |
 | `adaptations` | list | Prompt adaptations detected: `contract` \| `output_format` \| `compact` |
 
 ---
