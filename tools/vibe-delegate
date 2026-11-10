@@ -33,6 +33,7 @@
 # then treat the rest as positional. Each required string must already exist in
 # the workdir or the run is aborted before launch (see pre-flight gate below).
 REQUIRES=()
+INCLUDES=()
 POSITIONAL=()
 VERBOSE=0
 while [ $# -gt 0 ]; do
@@ -46,7 +47,19 @@ while [ $# -gt 0 ]; do
     --resume)
       # Continue an earlier Vibe session (its id is printed on every partial run).
       if [ $# -lt 2 ]; then echo "ERROR: --resume needs a session id" >&2; exit 2; fi
-      RESUME_SESSION="$2"; shift 2 ;;
+      RESUME_SESSION="$2"; RESUME_MODE="explicit"; shift 2 ;;
+    --resume-last)
+      # Reuse the most recent vibe session recorded for this workdir in the run
+      # log (resolved below). For continuation tasks only — the caller decides;
+      # never auto-resume unconditionally, a stale unrelated context pollutes runs.
+      RESUME_LAST=1; shift ;;
+    --no-resume) NO_RESUME=1; shift ;;
+    --include)
+      # --include path:A-B — inject the verbatim lines A-B of path (inside the
+      # workdir) into the prompt as a REFERENCE block, so Vibe does not need to
+      # grep/read that region. Repeatable. Capped at DELEGATE_INCLUDE_MAX_BYTES.
+      if [ $# -lt 2 ]; then echo "ERROR: --include needs path:A-B" >&2; exit 2; fi
+      INCLUDES+=("$2"); shift 2 ;;
     --continue-rounds)
       if [ $# -lt 2 ]; then echo "ERROR: --continue-rounds needs a number" >&2; exit 2; fi
       CONTINUE_ROUNDS="$2"; shift 2 ;;
@@ -57,7 +70,7 @@ while [ $# -gt 0 ]; do
 done
 set -- "${POSITIONAL[@]}"
 
-WORKDIR="${1:?Usage: vibe-delegate <workdir> <prompt> [max-turns] [agent] [timeout-secs] [--require STR ...]}"
+WORKDIR="${1:?Usage: vibe-delegate <workdir> <prompt> [max-turns] [agent] [timeout-secs] [--require STR ...] [--include path:A-B ...] [--resume SID | --resume-last | --no-resume]}"
 PROMPT="${2:?Prompt required}"
 MAX_TURNS="${3:-10}"
 AGENT="${4:-}"
@@ -74,9 +87,119 @@ fi
 
 case "$MAX_TURNS" in ''|*[!0-9]*) echo "ERROR: max-turns '$MAX_TURNS' is not a number" >&2; exit 2 ;; esac
 case "$TIMEOUT_SECS" in ''|*[!0-9]*) echo "ERROR: timeout-secs '$TIMEOUT_SECS' is not a number" >&2; exit 2 ;; esac
+# Turn-budget honesty (2026-11-10): a thinking-model call costs ~60-90s wall
+# clock, so a time budget smaller than max-turns x ~80s means the deadline hits
+# before the turn cap — the model is told a budget it cannot spend and stops
+# mid-task (observed: 12 turns / 480s -> only ~6 ran). Clamp max-turns to what the
+# budget allows so the RUN BUDGET line tells the truth and the model writes
+# earlier. Override the per-turn cost with DELEGATE_TURN_SECS_PER_TURN.
+TURN_SECS="${DELEGATE_TURN_SECS_PER_TURN:-80}"
+AFFORDABLE=$(( TIMEOUT_SECS / TURN_SECS ))
+if [ "$AFFORDABLE" -ge 1 ] && [ "$MAX_TURNS" -gt "$AFFORDABLE" ]; then
+  echo "WARNING: max-turns $MAX_TURNS clamped to $AFFORDABLE (timeout ${TIMEOUT_SECS}s / ~${TURN_SECS}s per model call). Raise timeout-secs or accept fewer turns." >&2
+  MAX_TURNS=$AFFORDABLE
+fi
 CONTINUE_ROUNDS="${CONTINUE_ROUNDS:-2}"
 case "$CONTINUE_ROUNDS" in ''|*[!0-9]*) echo "ERROR: --continue-rounds '$CONTINUE_ROUNDS' is not a number" >&2; exit 2 ;; esac
 RESUME_SESSION="${RESUME_SESSION:-}"
+RESUME_MODE="${RESUME_MODE:-}"
+AUTO_RESUME=0
+# ── Resume resolution ────────────────────────────────────────────────────────
+# Priority: explicit --resume <sid> > --resume-last > auto-detect > fresh session.
+# Auto-detect (default; off with --no-resume or DELEGATE_AUTO_RESUME=0): reuse the
+# most recent vibe session of this workdir when the previous run was cut by a
+# limit (unfinished task = continuation by definition); session still on disk,
+# last run < DELEGATE_AUTO_RESUME_MAX_AGE_H (default 24h) old, resume chain <
+# DELEGATE_MAX_RESUME_CHAIN (default 3). Lexical prompt-similarity auto-resume was
+# tried and REMOVED (2026-11-10): thresholds uncalibrated, never fired in prod —
+# --resume-last covers same-feature continuation, decided by the caller.
+# The model cannot pick its own session (the id is fixed at launch), so the check
+# lives in the launcher — the only place it can. Decision printed to stderr.
+if [ -z "$RESUME_SESSION" ] && [ "${NO_RESUME:-0}" != 1 ] && [ "${DELEGATE_AUTO_RESUME:-1}" != "0" ]; then
+  RL=$(DELEGATE_RUN_LOG="${DELEGATE_RUN_LOG:-$HOME/.local/share/delegate-runs.jsonl}" \
+       RESOLVE_WD="$WORKDIR" RESOLVE_MODE="${RESUME_LAST:+last}" \
+       python3 - <<'PYRES'
+import json, os, sys
+from datetime import datetime, timezone
+log = os.environ['DELEGATE_RUN_LOG']
+wd = os.path.realpath(os.environ['RESOLVE_WD'])
+mode = os.environ.get('RESOLVE_MODE') or 'auto'   # 'auto' | 'last' (empty env = auto)
+max_age_h = float(os.environ.get('DELEGATE_AUTO_RESUME_MAX_AGE_H', '24'))
+max_chain = int(os.environ.get('DELEGATE_MAX_RESUME_CHAIN', '3'))
+vh = os.environ.get('VIBE_HOME') or os.path.join(os.path.expanduser('~'), '.vibe')
+LIMIT_STOP = {'turn_cap', 'timeout', 'budget_limit', 'infra_error'}
+try:
+    lines = open(log, errors='replace').read().splitlines()
+except OSError:
+    sys.exit(0)
+now = datetime.now(timezone.utc)
+# Resume-chain cap: count consecutive most-recent same-workdir runs that resumed
+# a session (walking back until one did not). Past DELEGATE_MAX_RESUME_CHAIN
+# (default 3) auto-resume is refused — a long chain bloats the context and anchors
+# the model on stale decisions. Explicit --resume / --resume-last bypass the cap.
+chain = 0
+for line in reversed(lines):
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        r0 = json.loads(line)
+    except ValueError:
+        continue
+    if r0.get('delegate') != 'vibe' or os.path.realpath(r0.get('workdir') or '/') != wd:
+        continue
+    if r0.get('resumed_session'):
+        chain += 1
+    else:
+        break
+for line in reversed(lines):
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        r = json.loads(line)
+    except ValueError:
+        continue
+    if r.get('delegate') != 'vibe' or os.path.realpath(r.get('workdir') or '/') != wd:
+        continue
+    sid = r.get('session_id') or ''
+    if not sid:
+        continue
+    if not os.path.isfile(os.path.join(vh, 'logs', 'session', 'unified', sid, 'meta.json')):
+        continue
+    ts = r.get('ts', '')
+    age_h = 999.0
+    try:
+        age_h = (now - datetime.fromisoformat(ts.replace('Z', '+00:00'))).total_seconds() / 3600
+    except Exception:
+        pass
+    if mode == 'auto' and age_h > max_age_h:
+        continue
+    if mode == 'auto' and chain >= max_chain:
+        sys.stderr.write(f"[auto-resume] rejected {sid} (resume chain {chain} >= {max_chain}) — fresh session\n")
+        sys.exit(0)
+    reason = r.get('failure_reason', '')
+    if mode == 'last' or reason in LIMIT_STOP:
+        print(f"{sid}|{ts}|{reason}")
+        sys.exit(0)
+    sys.stderr.write(f"[auto-resume] rejected {sid} (age {age_h:.1f}h, reason {reason or 'ok'}) — fresh session\n")
+    sys.exit(0)
+PYRES
+)
+  if [ -n "$RL" ]; then
+    RESUME_SESSION="${RL%%|*}"
+    _rest="${RL#*|}"; RL_TS="${_rest%%|*}"; RL_REASON="${_rest#*|}"
+    if [ "${RESUME_LAST:-0}" = 1 ]; then
+      RESUME_MODE="last"
+      echo "[resume-last] reusing session $RESUME_SESSION (last vibe run for $WORKDIR: $RL_TS, reason ${RL_REASON:-ok})" >&2
+    else
+      AUTO_RESUME=1; RESUME_MODE="auto"
+      echo "[auto-resume] reusing session $RESUME_SESSION (last run $RL_TS was limit-stopped: ${RL_REASON:-ok}) — pass --no-resume for a fresh session" >&2
+    fi
+  elif [ "${RESUME_LAST:-0}" = 1 ]; then
+    echo "[resume-last] no previous vibe session found for $WORKDIR — starting fresh" >&2
+  fi
+fi
 
 # Agent mapping (2026-11-09). Vibe 3.0 (installed 2026-10-29) has only four primary
 # agents: ask | accept-edits | smart-approve | auto-approve. `plan`, `default`,
@@ -208,6 +331,20 @@ if [ -n "$PREWRITTEN_STAGED" ]; then
   echo "[PREFLIGHT] WARNING: the prompt asks Vibe to apply recently written file(s) exactly: $PREWRITTEN_STAGED. If you wrote that content, applying it yourself is cheaper than delegating." >&2
 fi
 
+# Prompt lint (2026-11-10, launch-time control): the read-burn failures came from
+# prompts naming too many reference files or saying "read X first". Non-blocking
+# warnings — the caller fixes the prompt, or passes --include path:A-B to inject
+# the needed regions verbatim instead of letting Vibe grep for them.
+PROMPT_FILES=$(printf '%s' "$PROMPT" | grep -oE '[A-Za-z0-9_./-]+\.(py|js|ts|jsx|tsx|html|json|md|sh|css|ya?ml|toml|txt|csv)' | sort -u)
+N_FILES=$(printf '%s\n' "$PROMPT_FILES" | grep -c .)
+if [ "$N_FILES" -gt 4 ]; then
+  echo "[PREFLIGHT] WARNING: prompt names $N_FILES files (rule: <= 4). Extra reads burn the time budget — pass the needed regions with --include path:A-B instead." >&2
+  echo "  files: $(printf '%s' "$PROMPT_FILES" | tr '\n' ' ')" >&2
+fi
+if printf '%s' "$PROMPT" | grep -qiE 'read [a-z0-9_./-]+ first|read (the )?(file|reference)s? first'; then
+  echo "[PREFLIGHT] WARNING: prompt says 'read ... first' — say what to extract instead (grep -n anchors), or use --include path:A-B." >&2
+fi
+
 BIG_LIST=""
 for _f in $(printf '%s' "$PROMPT" | grep -oE '[A-Za-z0-9_./-]+\.(py|js|html|json|md|sh|css|ya?ml|toml|txt)' | sort -u); do
   if [ -f "$_f" ] && [ "$(stat -c %s "$_f" 2>/dev/null || echo 0)" -gt 40000 ]; then
@@ -229,7 +366,7 @@ fi
 # name: asking for "search_replace" made Vibe spend turns on search_tool_functions (H4).
 PROMPT="$PROMPT
 
-RUN BUDGET: you have $MAX_TURNS turns in total. For in-place changes use the edit tool (to batch many similar edits in one turn you may call tools.file_system.edit from run_typescript). Keep your last turn for a short final summary of what you changed.
+RUN BUDGET: $MAX_TURNS turns total; one model call can cost 60-90s, so a time limit can hit after a few turns. WRITE EARLY: first file write within your first 3 turns. Read smart: grep -n the 2-4 anchors you need, read only the matched region, batch ALL independent reads in ONE call, never re-read a file, verify with grep. In-place changes: use the edit tool (batch many edits in one turn via tools.file_system.edit from run_typescript). Keep your last turn for a short summary. Partial writes count: what is on disk when the run is cut stays there.
 
 CHECKS: run only quick, targeted checks (one test file, one import, one script), each well under 60 s. Never run a full build, a whole-project type-check or the whole test suite: the caller verifies afterwards, and a long command can eat the run's whole time budget.
 
@@ -238,6 +375,52 @@ if [ "$READONLY" = 1 ]; then
   PROMPT="$PROMPT
 
 READ-ONLY RUN: do not modify, create or delete any file (file write tools are disabled; do not use bash to write either). Report your findings as your final answer."
+fi
+# Injected whenever the run continues an existing session (explicit --resume,
+# --resume-last, or auto-resume): the previous task is in the history, its files
+# are on disk — re-reading or redoing it is what burns the budget (2026-11-10:
+# a fresh session re-read the target file 5 times, 244k tokens, 0 files, turn_cap).
+if [ -n "$RESUME_SESSION" ]; then
+  PROMPT="$PROMPT
+
+RESUMED SESSION: you are continuing an existing session for this workdir — the previous task is in this history and its files are on disk. Do NOT re-read files you already read in this session, and do NOT redo completed work; if unsure what is already done, run git status --short and git diff --stat first. The new task below builds on that state."
+fi
+# --include path:A-B: inject verbatim line regions into the prompt as REFERENCE
+# blocks, so Vibe uses them directly instead of grepping/reading those files.
+if [ "${#INCLUDES[@]}" -gt 0 ]; then
+  INCLUDE_BLOCK=$(INCLUDES_NL="$(printf '%s\n' "${INCLUDES[@]}")" WD="$WORKDIR" python3 - <<'PYINC'
+import os, sys
+wd = os.path.realpath(os.environ['WD'])
+max_bytes = int(os.environ.get('DELEGATE_INCLUDE_MAX_BYTES', '8000'))
+out, total = [], 0
+for item in os.environ['INCLUDES_NL'].splitlines():
+    item = item.strip()
+    if not item:
+        continue
+    path, _, rng = item.rpartition(':')
+    try:
+        a_s, _, b_s = rng.partition('-')
+        a, b = int(a_s), int(b_s or a_s)
+    except ValueError:
+        sys.stderr.write(f"[include] bad range, skipped: {item}\n"); continue
+    ap = os.path.realpath(os.path.join(wd, path))
+    if not ap.startswith(wd + os.sep) or not os.path.isfile(ap):
+        sys.stderr.write(f"[include] not a file inside workdir, skipped: {item}\n"); continue
+    lines = open(ap, errors='replace').read().splitlines()
+    a = max(1, min(a, len(lines))); b = max(a, min(b, len(lines)))
+    chunk = '\n'.join(lines[a-1:b])
+    if total + len(chunk) > max_bytes:
+        chunk = chunk[:max(0, max_bytes - total)] + "\n... [truncated at DELEGATE_INCLUDE_MAX_BYTES]"
+    total += len(chunk)
+    out.append(f"REFERENCE {path}:{a}-{b} (verbatim — use directly, do NOT re-read or grep this region):\n```\n{chunk}\n```")
+print('\n\n'.join(out))
+PYINC
+)
+  if [ -n "$INCLUDE_BLOCK" ]; then
+    PROMPT="$PROMPT
+
+$INCLUDE_BLOCK"
+  fi
 fi
 AUDIT_RC=0
 
@@ -578,11 +761,23 @@ while :; do
   [ -n "$R_ERR" ] && echo "  [VIBE ERROR] $R_ERR"
   NEXT=""
   if [ "$R_OUTCOME" = "turn_limit" ] && [ "$CONTINUED" -lt "$CONTINUE_ROUNDS" ] && [ -n "$CUR_SID" ]; then
-    CONTINUED=$((CONTINUED + 1)); NEXT="turn limit reached — continuing the same session ($CONTINUED/$CONTINUE_ROUNDS)"
+    # CONTINUED is only incremented once the round is actually launched (below):
+    # incrementing here logged auto_continued=1 on runs where the budget check
+    # then broke the loop and no continuation round ever ran (seen 2026-11-10).
+    NEXT="turn limit reached — continuing the same session ($((CONTINUED + 1))/$CONTINUE_ROUNDS)"
   elif [ "$R_OUTCOME" = "infrastructure_failure" ] && [ "${R_STEPS:-0}" -gt 0 ] && ! is_permanent_api_error "$R_ERR" && [ "$INFRA_RETRIED" -eq 0 ] && [ -n "$CUR_SID" ]; then
     # steps > 0: the agent did run, so this is the model API failing mid-run
     # (e.g. IncompleteProviderStream), not a bad flag/agent (those have 0 steps).
     INFRA_RETRIED=1; NEXT="model API failed mid-run — resuming the same session once"
+  fi
+  if [ -z "$NEXT" ] && [ "$AUTO_RESUME" = 1 ] && [ "$ROUND" -eq 0 ] \
+     && { [ "$R_OUTCOME" = "usage_error" ] || [ "$R_OUTCOME" = "config_error" ]; } \
+     && [ "${R_STEPS:-0}" -eq 0 ] && [ -n "$CUR_SID" ]; then
+    # The auto-resumed session was rejected by vibe itself (stale/corrupt):
+    # fall back to one fresh session instead of dying with usage_error.
+    echo "  [auto-resume] session $CUR_SID rejected (${R_OUTCOME}, 0 steps) — starting a fresh session once"
+    CUR_SID=""; AUTO_RESUME=0; AUDIT_SKIP_SEQ=0; export AUDIT_SKIP_SEQ
+    NEXT="auto-resumed session unusable — fresh session"
   fi
   [ -z "$NEXT" ] && break
   # Continuation rounds only get what is left of the single total budget.
@@ -592,6 +787,7 @@ while :; do
     echo "=== NO AUTO-CONTINUE: total time budget (${TIMEOUT_SECS}s) spent ==="
     break
   fi
+  CONTINUED=$((CONTINUED + 1))
   ROUND=$((ROUND + 1))
   echo ""
   echo "=== AUTO-CONTINUE: $NEXT ==="
@@ -600,6 +796,18 @@ while :; do
 done
 FINAL_OUTCOME="$R_OUTCOME"
 FINAL_SID="$CUR_SID"
+
+# Late-write rescan (2026-11-10). A limit stop (deadline / turn_limit) interrupts
+# the model mid-turn and the pty wrapper's `timeout -k 15` lets the child finish
+# its in-flight tool call briefly AFTER the stream EOF the parser saw — so a
+# write_file can land on disk a few seconds after this loop ends, i.e. after the
+# verdict's find -newer would have run. Settle, then let the CHANGED scan below
+# (which runs after the token blocks) see it. Without this, the run is reported
+# "0 file(s) changed" while the file exists on disk (observed: write journaled
+# with a clean result, files_changed=0, the file on disk).
+if [ "$FINAL_OUTCOME" = "deadline" ] || [ "$FINAL_OUTCOME" = "turn_limit" ] || [ "$FINAL_OUTCOME" = "terminated" ]; then
+  sleep 5
+fi
 
 # Aggregate the exports of all rounds into the stats file (tokens are per round).
 python3 - "$RUN_DIR" "$DELEGATE_STATS_FILE" "$CONTINUED" << 'PYAGG'
@@ -898,7 +1106,7 @@ fi
 # the file was tracked, untracked, already dirty, or this is a non-git directory.
 # Caches created by Vibe's own test runs (__pycache__, .pytest_cache...) are not
 # changes: they inflated "N file(s) changed" (2 real edits reported as 6).
-CHANGED=$(find . \( -name .git -o -name __pycache__ -o -name .pytest_cache -o -name .mypy_cache -o -name .ruff_cache -o -name node_modules \) -prune -o -type f -newer "$SENTINEL" -print 2>/dev/null | sed 's|^\./||')
+CHANGED=$(find . \( -name .git -o -name __pycache__ -o -name .pytest_cache -o -name .mypy_cache -o -name .ruff_cache -o -name node_modules -o -name .vibe-recovery \) -prune -o -type f -newer "$SENTINEL" -print 2>/dev/null | sed 's|^\./||')
 
 SYNTAX_COUNT_FILE=$(mktemp /tmp/vibe-syntax-count-XXXXXX.txt)
 echo 0 > "$SYNTAX_COUNT_FILE"
@@ -984,8 +1192,8 @@ GIT_AFTER=$(git rev-parse HEAD 2>/dev/null || echo "no-git")
 # The previous audit read a pre-Vibe-3 shape (toolName/input) and the pruned
 # runtime-state, so on Vibe 3 it saw 0 writes on every run.
 if [ -n "$SESSION_LOG" ] && [ -d "$(dirname "$SESSION_LOG")/journal" ]; then
-  CHANGED_LIST="$CHANGED" AUDIT_RUN_DIR="$RUN_DIR" python3 - "$(dirname "$SESSION_LOG")" << 'PYAUDIT' || AUDIT_RC=$?
-import glob, json, os, sys
+  CHANGED_LIST="$CHANGED" AUDIT_RUN_DIR="$RUN_DIR" AUDIT_FINAL_OUTCOME="$FINAL_OUTCOME" python3 - "$(dirname "$SESSION_LOG")" << 'PYAUDIT' || AUDIT_RC=$?
+import glob, json, os, re, sys
 
 sess = sys.argv[1]
 changed = {p.strip() for p in os.environ.get("CHANGED_LIST", "").split() if p.strip()}
@@ -997,7 +1205,7 @@ def rel(path):
     path = path or ""
     return os.path.relpath(path) if os.path.isabs(path) else os.path.normpath(path)
 
-intents, results, order = {}, {}, []
+intents, results, order, intent_args = {}, {}, [], {}
 # Vibe prunes the live journal when it snapshots a new generation (every resume,
 # so every auto-continue round): round 1 wrote a-d, the live journal then held
 # only round 2 (seen 2026-11-09). Each round's --output-dir keeps a full copy of
@@ -1026,6 +1234,7 @@ for f in journal_files:
                 body = args.get("content") if tool == "write_file" else args.get("new_string")
                 intents[aid] = (tool, rel(args.get("file_path") or args.get("path")),
                                 len(body) if isinstance(body, str) else 0)
+                intent_args[aid] = args
                 order.append(aid)
         elif e.get("type") == "action_result" and aid:
             r = (p.get("result") or {}).get("result")
@@ -1061,6 +1270,27 @@ if failed_paths and not unrecovered:
     print("  (every failed write was followed by a successful one on the same file — recovered)")
 for p in sorted(changed - {p for _, p, _, _ in calls}):
     print(f"  [note] {p} changed on disk without a write call (bash/run_typescript, or a generated file)")
+
+# Orphaned-write recovery (2026-11-10): on a limit stop (deadline / turn_limit /
+# terminated) a write intent can have no action_result — the run was cut
+# mid-call and the payload never reached disk. Save every such payload under
+# .vibe-recovery/ in the workdir, NOT applied — a human/Claude applies it after
+# reading the audit. Without this the content existed only in a pruned journal.
+outcome = os.environ.get("AUDIT_FINAL_OUTCOME", "")
+if outcome in ("deadline", "turn_limit", "terminated"):
+    orphans = [(aid, intents[aid][0], intents[aid][1]) for aid in order
+               if aid in intent_args and aid not in results and not intents[aid][1].startswith("..")]
+    if orphans:
+        rec_dir = os.path.join(os.getcwd(), ".vibe-recovery")
+        os.makedirs(rec_dir, exist_ok=True)
+        print("")
+        print("=== ORPHANED WRITE RECOVERY (run cut mid-call; payloads saved, NOT applied) ===")
+        for aid, tool, path in orphans:
+            safe = re.sub(r"[^A-Za-z0-9_.-]", "_", path.strip("/"))[:120]
+            out = os.path.join(rec_dir, safe + ".json")
+            with open(out, "w") as fh:
+                json.dump({"tool": tool, "file_path": path, "arguments": intent_args[aid]}, fh, indent=1)
+            print(f"  {tool:<14} {path}  -> {out}")
 sf = os.environ.get("DELEGATE_STATS_FILE", "")
 if sf:
     try:
@@ -1142,6 +1372,8 @@ export DELEGATE_SYNTAX_ERRORS="$TOTAL_ERRORS"
 export DELEGATE_START_NS="$START_NS"
 export DELEGATE_END_NS="$END_NS"
 export DELEGATE_PROMPT_FILE="$PROMPT_FILE"
+export DELEGATE_RESUMED_SESSION="${RESUME_SESSION:-}"
+export DELEGATE_RESUME_MODE="${RESUME_MODE:-}"
 
 python3 << 'PYLOG'
 import json, os, re
@@ -1188,6 +1420,9 @@ if prompt_text:
 entry = {
     'ts':            datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
     'delegate':      os.environ.get('DELEGATE_NAME', 'vibe'),
+    # Head of the final prompt, kept so a future auto-resume heuristic could be
+    # calibrated by replaying the log (similarity auto-resume removed 2026-11-10).
+    'prompt_head':   (prompt_text or '')[:1500],
     'workdir':       os.environ.get('DELEGATE_WORKDIR', ''),
     'project':       os.path.basename(os.environ.get('DELEGATE_WORKDIR', '')),
     'prompt_words':  int(os.environ.get('DELEGATE_PROMPT_WORDS', 0) or 0),
@@ -1204,6 +1439,13 @@ entry = {
     'adaptations':          adaptations,
 }
 entry.update(stats)
+
+# Resume provenance: lets delegate-report measure auto-resume usage and
+# resume-chain length per workdir. prompt_head stays logged so a future
+# auto-resume heuristic could be calibrated by replaying the log.
+if os.environ.get('DELEGATE_RESUMED_SESSION'):
+    entry['resumed_session'] = os.environ['DELEGATE_RESUMED_SESSION']
+    entry['resume_mode'] = os.environ.get('DELEGATE_RESUME_MODE') or 'explicit'
 
 # Compute Claude Sonnet 4.6 equivalent cost for savings tracking.
 ti = entry.get('tokens_in', 0)
@@ -1344,11 +1586,18 @@ _FAIL_HINTS = {
 _sid = stats.get('session_id') or ''
 _verr = stats.get('vibe_error') or ''
 if _reason in _FAIL_HINTS:
-    print(f'=== RESULT: FAILED [{_reason}] — {_FAIL_HINTS[_reason]}. Do NOT report success; inspect git diff. ===')
+    if _reason in ('turn_cap', 'timeout', 'budget_limit', 'infra_error') and _fc > 0:
+        # A limit stop does not mean nothing landed: a write in flight when the
+        # limit hit can still be on disk (see the late-write rescan above).
+        # Seen 2026-11-10: FAILED [timeout] printed with files_changed=1, and the
+        # supervisor concluded "nothing was done" without reading the diff.
+        print(f'=== RESULT: PARTIAL [{_reason}] — {_fc} file(s) DID land on disk despite the limit. Read the DIFF / git status below BEFORE relaunching anything. ===')
+    else:
+        print(f'=== RESULT: FAILED [{_reason}] — {_FAIL_HINTS[_reason]}. Do NOT report success; inspect git diff. ===')
     if _verr:
         print(f'    vibe error: {_verr}')
     if _sid and _reason in ('turn_cap', 'timeout', 'budget_limit', 'infra_error'):
-        print(f'    resume this session (keeps its context): vibe-delegate <workdir> "continue" <turns> --resume {_sid}')
+        print(f'    resume this session (keeps its context — for the rest of THIS task, never a fresh session): vibe-delegate <workdir> "continue" <turns> --resume {_sid}')
 elif _agent in _readonly_agents:
     print('=== RESULT: READ-ONLY run (no writes expected) ===')
 else:

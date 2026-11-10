@@ -37,7 +37,9 @@ report). It pays only when Vibe does the reading and the thinking.
 - Workdir = `git rev-parse --show-toplevel`; ask if ambiguous.
 - One objective per run. 1 file: 5-8 turns. 2-3 files: 8-12 turns. Several
   distinct objectives or business logic: split into sequential runs and check
-  `git diff` between them. Never more than 12 turns.
+  `git diff` between them. Never more than 12 turns. A turn costs ~60–90 s wall
+  clock under a thinking model: at 300–480 s only ~4–6 turns run, so keep one
+  run to ONE new file at that budget.
 - Split by objective, not by file: the same mechanical change across 10 files
   is ONE run (each run costs you a prompt, a report and extra turns; a
   10-module change split into 8 runs cost 35 % more than the same change in 4).
@@ -61,7 +63,17 @@ VERIFY: grep for "<exact new line>" in <file>
 - **Keep the prompt short** (≈1,500 characters at most): you pay it at output
   price. Goal, files, constraints, check. Do not explain what Vibe can read
   in the files itself. (Past prompts: 3,000 characters median.)
+- **Cap the reading**: ≤ 4 reference files in total (inline mentions in
+  TASK/VERIFY count). Say: "grep -n for the anchors, read only those regions,
+  never re-read". Never write "read X first" in the prompt; cap `file:line`
+  comments to "the 3–5 main formulas". Reading burns the budget (one 2026-11-10
+  run: 485 s, 128k tokens, 0 files, all reads).
 - Name the exact files to modify. Say "the edit tool", not "search_replace".
+- **Give the regions, don't make Vibe grep them**: when you already know the
+  lines, `sed -n 'A,Bp' file` yourself and pass `--include file:A-B` (repeatable)
+  — the harness injects the verbatim region as a REFERENCE block and Vibe uses
+  it directly. The launch lint warns if the prompt names > 4 files or says
+  "read … first".
 - Files Vibe must read have to be **inside the workdir** (outside paths are
   denied silently).
 - Never ask for one single write of a big new file: let it write in parts.
@@ -78,8 +90,17 @@ VERIFY: grep for "<exact new line>" in <file>
 ```
 
 - `agent`: none for edits; `plan` for read-only review/analysis (writes disabled).
-- `timeout-secs` is the total budget. If Vibe runs out of turns, the script
-  resumes the same session up to 2 more rounds by itself.
+- Resume: same feature / fix-up after `PARTIAL` → `--resume-last`; unrelated
+  task → `--no-resume`. By default the harness **auto-resumes** the last
+  same-workdir session when the previous run was limit-stopped (last run < 24 h,
+  resume chain < 3) — printed as `[auto-resume] …` and logged. Resuming is cheap
+  (measured 77–88 % of re-sent input is cache hits, median 87 %, n=3 runs with
+  cache data); a fresh session re-reads all. On a limit stop, orphaned writes are
+  saved to `.vibe-recovery/` (not applied).
+- `timeout-secs` is the total budget — count `max-turns × 80 s` (a turn is
+  ~60–90 s with a thinking model): 12 turns ≈ 600–960 s. The script clamps
+  max-turns to `timeout/80` itself (warning printed), so the budget told to
+  Vibe is always spendable. Out of turns → same session resumed up to 2 rounds.
 - `--resume <id>` continues a partial run (the id is printed on failure).
 - Foreground or background both work. In the foreground, set the Bash tool
   timeout to `(timeout-secs + 120) × 1000` ms (max 600000). In the background,
@@ -94,7 +115,8 @@ The **last line** is the verdict; trust it over anything Vibe narrated.
 |---|---|
 | `RESULT: OK — N file(s) changed` | Writes landed. Review the `DIFF` block printed just above, in this same turn: the harness checks writes, not correctness. Run an extra `git diff`, grep or Read only for what that block truncated or what looks wrong |
 | `RESULT: READ-ONLY run` | Use the `VIBE FINAL ANSWER` block |
-| `FAILED [turn_cap]` / `[timeout]` | Partial. Run the printed `--resume` command, or split the task |
+| `RESULT: PARTIAL [reason]` | Files landed despite the limit: review the DIFF, finish with the printed `--resume` — never a fresh run for the rest of this task |
+| `FAILED [turn_cap]` / `[timeout]` / `[budget_limit]` | Maybe partial: FIRST `git status --short` + read the diff (a write in flight at the limit can land late), then the printed `--resume <id>` — never a fresh session for the remainder. Or split |
 | `FAILED [usage_error]` | Bad agent, flag or model setting: fix it, never retry verbatim |
 | `FAILED [infra_error]` | Model API down: retry later or resume |
 | `FAILED [wrote_nothing]`, `[write_mismatch]`, `[syntax_error]`, others | Read the `WRITE AUDIT` block, then step 5 |
