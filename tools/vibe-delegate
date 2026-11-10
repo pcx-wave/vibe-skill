@@ -51,6 +51,7 @@ while [ $# -gt 0 ]; do
       if [ $# -lt 2 ]; then echo "ERROR: --continue-rounds needs a number" >&2; exit 2; fi
       CONTINUE_ROUNDS="$2"; shift 2 ;;
     --no-continue) CONTINUE_ROUNDS=0; shift ;;
+    --allow-code) ALLOW_CODE=1; shift ;;
     *) POSITIONAL+=("$1"); shift ;;
   esac
 done
@@ -171,6 +172,42 @@ GIT_BEFORE=$(git rev-parse HEAD 2>/dev/null || echo "no-git")
 # grep/sed exploration and writes nothing (app/__init__.py, 2 of 3 runs). Any
 # existing file named in the prompt above 40 KB gets a standing instruction so
 # this no longer depends on the caller remembering it.
+# Pre-written code guard (2026-11-10). In 36 of 169 real delegations (21 %) Claude
+# had already written the code or final text, in the prompt (9) or in a staging
+# file the prompt told Vibe to apply "exactly" (28, ~4,800 chars each): Claude
+# paid for writing it (output tokens) and then for the delegation. If the code
+# is written, applying it directly is cheaper. --allow-code overrides.
+PREWRITTEN=$(PROMPT_TEXT="$PROMPT" WD="$WORKDIR" python3 - << 'PYCODE'
+import os, re, subprocess, time
+p = os.environ["PROMPT_TEXT"]; wd = os.environ["WD"]
+code_re = re.compile(r'^\s*(def |class |async def |function |const |let |var |import |from \S+ import |export |return |@\w|<[a-zA-Z][^>]*>|[\w.\[\]"\']+\s*=\s*\S)')
+code = sum(1 for ln in p.split("\n") if code_re.match(ln))
+staged = []
+if re.search(r"verbatim|exactly|character for character|apply (its|the|all)|copy (it|the)", p, re.I):
+    for name in set(re.findall(r"[\w./-]+\.(?:txt|md|py|js|ts|json|html|patch|diff)", p)):
+        f = os.path.join(wd, name)
+        try:
+            st = os.stat(f)
+        except OSError:
+            continue
+        if st.st_size > 1500 and time.time() - st.st_mtime < 3600:
+            staged.append(f"{name}({st.st_size // 1024}KB)")
+print(f"{code}|{' '.join(staged)}")
+PYCODE
+)
+PREWRITTEN_CODE_LINES=${PREWRITTEN%%|*}
+PREWRITTEN_STAGED=${PREWRITTEN#*|}
+if [ "${PREWRITTEN_CODE_LINES:-0}" -ge 10 ] && [ "${ALLOW_CODE:-0}" != 1 ]; then
+  echo "=== PRECHECK ABORT — the prompt already contains ${PREWRITTEN_CODE_LINES} lines of written code ==="
+  echo "If the code is written, apply it yourself: delegating it pays for it twice."
+  echo "Otherwise describe the goal, the files and the check, and let Vibe write the code."
+  echo "(Override: --allow-code.) Nothing was launched."
+  exit 2
+fi
+if [ -n "$PREWRITTEN_STAGED" ]; then
+  echo "[PREFLIGHT] WARNING: the prompt asks Vibe to apply recently written file(s) exactly: $PREWRITTEN_STAGED. If you wrote that content, applying it yourself is cheaper than delegating." >&2
+fi
+
 BIG_LIST=""
 for _f in $(printf '%s' "$PROMPT" | grep -oE '[A-Za-z0-9_./-]+\.(py|js|html|json|md|sh|css|ya?ml|toml|txt)' | sort -u); do
   if [ -f "$_f" ] && [ "$(stat -c %s "$_f" 2>/dev/null || echo 0)" -gt 40000 ]; then

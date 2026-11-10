@@ -51,6 +51,12 @@ CONSTRAINTS: <what must not break; exact signatures; data field paths>
 VERIFY: grep for "<exact new line>" in <file>
 ```
 
+- **Never write the code or the final text for Vibe**: not in the prompt, and
+  not in a spec/staging file you ask it to apply "exactly". That pays for the
+  work twice (21 % of past delegations did it). Describe the goal, the files,
+  the constraints and the check; Vibe writes the code. An exact signature or a
+  one-line anchor is fine. If you already have the code, apply it yourself.
+  The script refuses prompts with 10+ lines of code (`--allow-code` overrides).
 - Name the exact files to modify. Say "the edit tool", not "search_replace".
 - Files Vibe must read have to be **inside the workdir** (outside paths are
   denied silently).
