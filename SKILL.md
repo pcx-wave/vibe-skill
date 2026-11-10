@@ -28,6 +28,7 @@ report). It pays only when Vibe does the reading and the thinking.
 | Task | Action |
 |---|---|
 | 1 file, ≤10 lines, location known | Edit directly |
+| You could do it in 1-2 turns yourself | Edit directly: a delegation costs a prompt, a run and a review, and a failed one costs double |
 | You could paste the final code into the prompt | Edit directly (you already did the work) |
 | Location unknown, logic to write, several files, much code to read | Delegate |
 
@@ -57,13 +58,17 @@ VERIFY: grep for "<exact new line>" in <file>
   the constraints and the check; Vibe writes the code. An exact signature or a
   one-line anchor is fine. If you already have the code, apply it yourself.
   The script refuses prompts with 10+ lines of code (`--allow-code` overrides).
+- **Keep the prompt short** (≈1,500 characters at most): you pay it at output
+  price. Goal, files, constraints, check. Do not explain what Vibe can read
+  in the files itself. (Past prompts: 3,000 characters median.)
 - Name the exact files to modify. Say "the edit tool", not "search_replace".
 - Files Vibe must read have to be **inside the workdir** (outside paths are
   denied silently).
 - Never ask for one single write of a big new file: let it write in parts.
 - Accented characters or emoji in the text to replace: tell Vibe to use
   `python3` with `pathlib` read/write (utf-8) for that change.
-- HTML or long code content: put it in a file inside the workdir and point to it.
+- Input data Vibe must use (HTML, a sample, a reference file you did not
+  write): put it in a file inside the workdir and point to it.
 - Before an edit prompt, `grep -n` the anchor yourself and pass it as `--require`.
 
 ## 3. Launch
@@ -76,6 +81,10 @@ VERIFY: grep for "<exact new line>" in <file>
 - `timeout-secs` is the total budget. If Vibe runs out of turns, the script
   resumes the same session up to 2 more rounds by itself.
 - `--resume <id>` continues a partial run (the id is printed on failure).
+- Foreground or background both work. In the foreground, set the Bash tool
+  timeout to `(timeout-secs + 120) × 1000` ms (max 600000). In the background,
+  **do not poll its output**: wait for the completion notification. Each poll
+  is a full turn of your context (16 % of past background runs polled).
 
 ## 4. Read the result
 
@@ -83,7 +92,7 @@ The **last line** is the verdict; trust it over anything Vibe narrated.
 
 | Last line | Do |
 |---|---|
-| `RESULT: OK — N file(s) changed` | Writes landed. Still read `git diff` and grep the changed lines: the harness checks writes, not correctness |
+| `RESULT: OK — N file(s) changed` | Writes landed. Review the `DIFF` block printed just above, in this same turn: the harness checks writes, not correctness. Run an extra `git diff`, grep or Read only for what that block truncated or what looks wrong |
 | `RESULT: READ-ONLY run` | Use the `VIBE FINAL ANSWER` block |
 | `FAILED [turn_cap]` / `[timeout]` | Partial. Run the printed `--resume` command, or split the task |
 | `FAILED [usage_error]` | Bad agent, flag or model setting: fix it, never retry verbatim |

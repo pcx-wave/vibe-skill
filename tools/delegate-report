@@ -3,7 +3,7 @@
 
 Usage:
   delegate-report [--since DAYS] [--project NAME] [--fails] [--adapt]
-                   [--all] [--delegate NAME] [--self-improve]
+                   [--all] [--delegate NAME] [--self-improve] [--claude]
 """
 
 import json, sys, argparse
@@ -553,6 +553,102 @@ def show_fails(runs, limit=20, include_warns=False, benchmark=False):
     print()
 
 
+# ── Claude-side cost of delegations (2026-11-10) ──────────────────────────────
+# The run log only knows Vibe's tokens. What delegation costs CLAUDE is in the
+# Claude Code transcripts (~/.claude/projects/*/*.jsonl): the prompt Claude wrote,
+# how big its context was, and how many calls it made after each delegation
+# (review, polling, fixes) before the next delegation or the next human message.
+CLAUDE_PROJECTS = Path.home() / '.claude' / 'projects'
+_DLG_RE = None
+_CODE_RE = None
+
+
+def _claude_delegations(since_days=None, project=None):
+    import re
+    global _DLG_RE, _CODE_RE
+    _DLG_RE = _DLG_RE or re.compile(r'vibe-delegate\s+["\'$/~]')
+    _CODE_RE = _CODE_RE or re.compile(
+        r'^\s*(def |class |async def |function |const |let |var |import |from \S+ import |export |return |@\w|<[a-zA-Z][^>]*>|[\w.\[\]"\']+\s*=\s*\S)')
+    cutoff = None
+    if since_days:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=since_days)).strftime('%Y-%m-%dT%H:%M:%S')
+    rows = []
+    for f in CLAUDE_PROJECTS.glob('*/*.jsonl'):
+        if project and project.lower() not in f.parent.name.lower():
+            continue
+        try:
+            msgs = [json.loads(l) for l in open(f, errors='replace') if l.strip()]
+        except (OSError, ValueError):
+            continue
+        msgs = [m for m in msgs if m.get('type') in ('assistant', 'user')]
+        idx = []
+        for i, m in enumerate(msgs):
+            if m.get('type') != 'assistant' or (cutoff and (m.get('timestamp') or '') < cutoff):
+                continue
+            for c in (m.get('message') or {}).get('content') or []:
+                if c.get('type') == 'tool_use' and c.get('name') == 'Bash' \
+                        and _DLG_RE.search((c.get('input') or {}).get('command', '')):
+                    idx.append((i, c))
+        for n, (i, c) in enumerate(idx):
+            cmd = c['input'].get('command', '')
+            u = (msgs[i].get('message') or {}).get('usage') or {}
+            ctx = sum(u.get(k) or 0 for k in ('input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'))
+            end = idx[n + 1][0] if n + 1 < len(idx) else len(msgs)
+            seen, polls, edits = set(), 0, 0
+            for m in msgs[i + 1:end]:
+                cont = (m.get('message') or {}).get('content')
+                if m.get('type') == 'user' and (isinstance(cont, str) or any(
+                        isinstance(x, dict) and x.get('type') == 'text' for x in cont or [])):
+                    break  # a human message ends the delegation episode
+                if m.get('type') != 'assistant':
+                    continue
+                mid = (m.get('message') or {}).get('id')
+                if mid in seen:
+                    continue
+                seen.add(mid)
+                for x in cont or []:
+                    if x.get('type') != 'tool_use':
+                        continue
+                    xc = (x.get('input') or {}).get('command', '') if x.get('name') == 'Bash' else ''
+                    if re.search(r'\b(tail|cat)\b.*(out|log)', xc) or x.get('name') in ('BashOutput', 'TaskOutput'):
+                        polls += 1
+                    if x.get('name') in ('Edit', 'Write', 'MultiEdit'):
+                        edits += 1
+            rows.append({
+                'background': bool(c['input'].get('run_in_background')) or ' &' in cmd,
+                'prompt_chars': len(cmd),
+                'code_lines': sum(1 for l in cmd.split('\n') if _CODE_RE.match(l)),
+                'context': ctx,
+                'followups': len(seen),
+                'polls': polls,
+                'claude_edits': edits,
+            })
+    return rows
+
+
+def show_claude_side(since_days=None, project=None):
+    rows = _claude_delegations(since_days, project)
+    if not rows:
+        print("No delegation found in the Claude Code transcripts for this window.")
+        return
+    def med(k):
+        xs = sorted(r[k] for r in rows)
+        return xs[len(xs) // 2]
+    n = len(rows)
+    pct = lambda c: f"{100 * c / n:.0f}%"
+    print(f"\nCLAUDE-SIDE COST OF DELEGATIONS  ({n} delegations in Claude transcripts"
+          f"{f', last {since_days}d' if since_days else ''})")
+    print("Goal: few follow-up calls, short prompts, no pre-written code, no output polling.\n")
+    print(f"  Claude context when delegating (median)   : {med('context'):>9,} tokens  (each Claude call re-reads it)")
+    print(f"  Follow-up Claude calls per delegation      : median {med('followups')}, "
+          f"p75 {sorted(r['followups'] for r in rows)[int(.75 * n)]}")
+    print(f"  Prompt size (median)                       : {med('prompt_chars'):>9,} chars   (target <= 1,500)")
+    print(f"  Prompts carrying >= 10 lines of code       : {sum(r['code_lines'] >= 10 for r in rows):>5}  ({pct(sum(r['code_lines'] >= 10 for r in rows))})  (target 0)")
+    bg = [r for r in rows if r['background']]
+    print(f"  Background runs that polled their output   : {sum(r['polls'] > 0 for r in bg):>5} of {len(bg)}  (target 0; background is fine, polling is not)")
+    print(f"  Delegations Claude had to fix by hand      : {sum(r['claude_edits'] > 0 for r in rows):>5}  ({pct(sum(r['claude_edits'] > 0 for r in rows))})")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Delegate run report")
     ap.add_argument('--since', type=int, metavar='DAYS', help='Last N days only')
@@ -564,7 +660,13 @@ def main():
     ap.add_argument('--self-improve', action='store_true',
                      help='Scan for new/rising failure_reason patterns for this delegate '
                           '(pure detection — never edits SKILL.md itself)')
+    ap.add_argument('--claude', action='store_true',
+                     help="Claude-side cost of delegations, read from the Claude Code transcripts")
     args = ap.parse_args()
+
+    if args.claude:
+        show_claude_side(args.since, args.project)
+        return
 
     if args.all:
         delegate, scope = None, 'all delegates'

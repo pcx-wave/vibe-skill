@@ -1090,6 +1090,37 @@ else
   git status --short -- "$WORKDIR" 2>/dev/null
 fi
 
+# Compact diff of the files THIS run changed (2026-11-10). Claude must re-read
+# Vibe's work; separate grep / Read / git diff calls cost it 4 follow-up turns in
+# the median real delegation, each re-reading a ~216k-token context. Printing the
+# diff here lets it review in the same turn. Capped at DELEGATE_DIFF_LINES (150).
+if [ -n "$(printf '%s' "$CHANGED" | tr -d '[:space:]')" ] && git rev-parse --git-dir >/dev/null 2>&1; then
+  CHANGED_LIST="$CHANGED" python3 - << 'PYDIFF'
+import os, subprocess
+cap = int(os.environ.get("DELEGATE_DIFF_LINES", "150") or 150)
+files = [f for f in os.environ.get("CHANGED_LIST", "").split() if f.strip()]
+out = []
+for f in files:
+    tracked = subprocess.run(["git", "ls-files", "--error-unmatch", f], capture_output=True).returncode == 0
+    if tracked:
+        d = subprocess.run(["git", "diff", "-U1", "--no-color", "--", f], capture_output=True, text=True).stdout
+        out += [l for l in d.splitlines() if not l.startswith(("diff --git", "index "))]
+    else:
+        try:
+            lines = open(f, errors="replace").read().splitlines()
+        except OSError:
+            continue
+        out.append(f"+++ new file {f} ({len(lines)} lines)")
+        out += ["+" + l for l in lines]
+total = len(out)
+print("")
+print(f"=== DIFF (this run, {len(files)} file(s), {total} lines) ===")
+print("\n".join(out[:cap]))
+if total > cap:
+    print(f"... truncated at {cap} of {total} lines: read the rest with git diff only where needed")
+PYDIFF
+fi
+
 
 # ── Run log ────────────────────────────────────────────────────────────────────
 END_NS=$(date +%s%N)
