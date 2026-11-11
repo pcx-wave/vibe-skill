@@ -47,10 +47,10 @@ report). It pays only when Vibe does the reading and the thinking.
 ## 2. Write the prompt (English, self-contained)
 
 ```
-Stack: <languages, frameworks>
-Key files: <path> (<role>), ...      # only what Vibe must read, at most 4
+Stack: <languages, frameworks>                  # optional
 TASK: <one imperative>
-CONSTRAINTS: <what must not break; exact signatures; data field paths>
+MODIFY: a.py, b.py                             # files to change; read-only agents omit this line
+CONSTRAINTS: <what must not break; exact signatures; data field paths>  # optional
 VERIFY: grep for "<exact new line>" in <file>
 ```
 
@@ -72,8 +72,9 @@ VERIFY: grep for "<exact new line>" in <file>
 - **Give the regions, don't make Vibe grep them**: when you already know the
   lines, `sed -n 'A,Bp' file` yourself and pass `--include file:A-B` (repeatable)
   — the harness injects the verbatim region as a REFERENCE block and Vibe uses
-  it directly. The launch lint warns if the prompt names > 4 files or says
-  "read … first".
+  it directly. The launch preflight refuses (exit 2, nothing launched) a prompt
+  that misses a `TASK:`/`MODIFY:`/`VERIFY:` header (MODIFY optional for
+  read-only agents), names > 4 files, or says "read … first".
 - Files Vibe must read have to be **inside the workdir** (outside paths are
   denied silently).
 - Never ask for one single write of a big new file: let it write in parts.

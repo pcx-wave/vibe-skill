@@ -65,12 +65,13 @@ while [ $# -gt 0 ]; do
       CONTINUE_ROUNDS="$2"; shift 2 ;;
     --no-continue) CONTINUE_ROUNDS=0; shift ;;
     --allow-code) ALLOW_CODE=1; shift ;;
+    --force) FORCE=1; shift ;;
     *) POSITIONAL+=("$1"); shift ;;
   esac
 done
 set -- "${POSITIONAL[@]}"
 
-WORKDIR="${1:?Usage: vibe-delegate <workdir> <prompt> [max-turns] [agent] [timeout-secs] [--require STR ...] [--include path:A-B ...] [--resume SID | --resume-last | --no-resume]}"
+WORKDIR="${1:?Usage: vibe-delegate <workdir> <prompt> [max-turns] [agent] [timeout-secs] [--require STR ...] [--include path:A-B ...] [--resume SID | --resume-last | --no-resume] [--force]}"
 PROMPT="${2:?Prompt required}"
 MAX_TURNS="${3:-10}"
 AGENT="${4:-}"
@@ -331,18 +332,105 @@ if [ -n "$PREWRITTEN_STAGED" ]; then
   echo "[PREFLIGHT] WARNING: the prompt asks Vibe to apply recently written file(s) exactly: $PREWRITTEN_STAGED. If you wrote that content, applying it yourself is cheaper than delegating." >&2
 fi
 
-# Prompt lint (2026-11-10, launch-time control): the read-burn failures came from
-# prompts naming too many reference files or saying "read X first". Non-blocking
-# warnings — the caller fixes the prompt, or passes --include path:A-B to inject
-# the needed regions verbatim instead of letting Vibe grep for them.
-PROMPT_FILES=$(printf '%s' "$PROMPT" | grep -oE '[A-Za-z0-9_./-]+\.(py|js|ts|jsx|tsx|html|json|md|sh|css|ya?ml|toml|txt|csv)' | sort -u)
-N_FILES=$(printf '%s\n' "$PROMPT_FILES" | grep -c .)
-if [ "$N_FILES" -gt 4 ]; then
-  echo "[PREFLIGHT] WARNING: prompt names $N_FILES files (rule: <= 4). Extra reads burn the time budget — pass the needed regions with --include path:A-B instead." >&2
-  echo "  files: $(printf '%s' "$PROMPT_FILES" | tr '\n' ' ')" >&2
+# ── Launch preflight (2026-11-11): blocking refusals ────────────────────────
+# The read-burn failures came from prompts naming too many reference files or
+# saying "read X first"; headerless prompts and fresh runs over recent sessions
+# burn the budget the same way. Every rule below refuses BEFORE vibe is
+# launched (exit 2) — nothing is spent. --force bypasses all of them and the
+# bypassed rule names are logged as preflight_forced in the run entry (PYLOG).
+VIOLATION_NAMES=()
+VIOLATION_MSGS=()
+pf_add() { VIOLATION_NAMES+=("$1"); VIOLATION_MSGS+=("$2"); }
+# Rule 1: TASK/MODIFY/VERIFY headers — a prompt without them delegates nothing.
+# Skipped on a resumed session: its task is already in the history, and the
+# printed resume hint is a bare "continue" prompt.
+if [ -z "${RESUME_SESSION:-}" ]; then
+  printf '%s' "$PROMPT" | grep -q 'TASK:'   || pf_add missing_task_header "missing TASK: header — the prompt must state one imperative"
+  printf '%s' "$PROMPT" | grep -q 'VERIFY:' || pf_add missing_verify_header "missing VERIFY: header — the prompt must name the check command"
+  if [ "$READONLY" != 1 ]; then
+    printf '%s' "$PROMPT" | grep -q 'MODIFY:' || pf_add missing_modify_header "missing MODIFY: header — list the files to change (read-only agents may omit it)"
+  fi
 fi
+# Files to modify are not reads: a mechanical change across 10 files is one run.
+MODIFY_FILES=$(printf '%s\n' "$PROMPT" | grep -E 'MODIFY:' | head -1 | sed 's/.*MODIFY:[[:space:]]*//' | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]].*//' | grep .)
+PROMPT_FILES=$(printf '%s' "$PROMPT" | grep -oE '[A-Za-z0-9_./-]+\.(py|js|ts|jsx|tsx|html|json|md|sh|css|ya?ml|toml|txt|csv)' | sort -u | grep -vxF -f <(printf '%s\n' "${MODIFY_FILES:-/dev/null/none}"))
+N_FILES=$(printf '%s\n' "$PROMPT_FILES" | grep -c .)
+# Rule 2: > 4 named files — extra reads burn the time budget.
+if [ "$N_FILES" -gt 4 ]; then
+  pf_add too_many_files "prompt names $N_FILES files (rule: <= 4) — pass the needed regions with --include path:A-B instead"
+  echo "[PREFLIGHT] files: $(printf '%s' "$PROMPT_FILES" | tr '\n' ' ')" >&2
+fi
+# Rule 3: "read ... first" — say what to extract instead of a blanket read.
 if printf '%s' "$PROMPT" | grep -qiE 'read [a-z0-9_./-]+ first|read (the )?(file|reference)s? first'; then
-  echo "[PREFLIGHT] WARNING: prompt says 'read ... first' — say what to extract instead (grep -n anchors), or use --include path:A-B." >&2
+  pf_add read_first "prompt says 'read ... first' — say what to extract (grep -n anchors), or use --include path:A-B"
+fi
+# Rule 4: more than one not-yet-existing MODIFY file with a short budget —
+# scaffolding blank files is slow; more than one does not fit under 480 s.
+MODIFY_LINE=$(printf '%s\n' "$PROMPT" | grep -E 'MODIFY:' | head -1 | sed 's/.*MODIFY:[[:space:]]*//')
+if [ -n "$MODIFY_LINE" ]; then
+  UNBORN=0; UNBORN_LIST=""
+  IFS=',' read -r -a _mfiles <<< "$MODIFY_LINE"
+  for _f in "${_mfiles[@]}"; do
+    _f="${_f#"${_f%%[![:space:]]*}"}"; _f="${_f%%[[:space:]]*}"
+    case "$_f" in ''|none|-|n/a) continue ;; esac
+    if [ ! -f "$_f" ] && [ ! -f "$WORKDIR/$_f" ]; then
+      UNBORN=$((UNBORN+1)); UNBORN_LIST="$UNBORN_LIST $_f"
+    fi
+  done
+  if [ "$UNBORN" -gt 1 ] && [ "$TIMEOUT_SECS" -lt 480 ]; then
+    pf_add unborn_files_short_timeout "MODIFY lists $UNBORN file(s) not on disk yet ($UNBORN_LIST) with timeout-secs ${TIMEOUT_SECS}s — creating more than one new file needs >= 480"
+  fi
+fi
+# Rule 5: a vibe run for this workdir finished < 2 h ago and no resume choice
+# was made — the caller must pick --resume-last (continue) or --no-resume.
+if [ -z "${RESUME_SESSION:-}" ] && [ "${RESUME_LAST:-0}" != 1 ] && [ "${NO_RESUME:-0}" != 1 ]; then
+  RECENT_RUN=$(DELEGATE_RUN_LOG="${DELEGATE_RUN_LOG:-$HOME/.local/share/delegate-runs.jsonl}" PREFLIGHT_WD="$WORKDIR" python3 - <<'PYRECENT'
+import json, os, sys
+from datetime import datetime, timezone
+try:
+    lines = open(os.environ['DELEGATE_RUN_LOG'], errors='replace').read().splitlines()
+except OSError:
+    sys.exit(0)
+wd = os.path.realpath(os.environ['PREFLIGHT_WD'])
+now = datetime.now(timezone.utc)
+for line in reversed(lines):        # most recent matching run decides
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        r = json.loads(line)
+    except ValueError:
+        continue
+    if r.get('delegate') != 'vibe' or os.path.realpath(r.get('workdir') or '/') != wd:
+        continue
+    try:
+        age_h = (now - datetime.fromisoformat(r.get('ts', '').replace('Z', '+00:00'))).total_seconds() / 3600
+    except Exception:
+        continue
+    if age_h < 2:
+        print('yes')
+    sys.exit(0)
+PYRECENT
+)
+  if [ "$RECENT_RUN" = "yes" ]; then
+    pf_add recent_run_no_resume_flag "a vibe run for this workdir finished < 2 h ago — pass --resume-last (continue) or --no-resume (fresh)"
+  fi
+fi
+if [ "${#VIOLATION_NAMES[@]}" -gt 0 ]; then
+  if [ "${FORCE:-0}" = 1 ]; then
+    DELEGATE_PREFLIGHT_FORCED="$(IFS=,; echo "${VIOLATION_NAMES[*]}")"
+    export DELEGATE_PREFLIGHT_FORCED
+    echo "[PREFLIGHT] --force: bypassing ${#VIOLATION_NAMES[@]} rule(s) [$DELEGATE_PREFLIGHT_FORCED] — launching anyway" >&2
+  else
+    echo "=== PREFLIGHT REFUSAL — nothing was launched ===" >&2
+    for _i in "${!VIOLATION_MSGS[@]}"; do echo "  - ${VIOLATION_MSGS[$_i]}" >&2; done
+    echo "Required prompt format:" >&2
+    echo "  TASK: <one imperative>" >&2
+    echo "  MODIFY: a.py, b.py   (read-only agents may omit MODIFY)" >&2
+    echo "  VERIFY: <command>" >&2
+    echo "(Fix the prompt, or pass --force to bypass all refusals.)" >&2
+    exit 2
+  fi
 fi
 
 BIG_LIST=""
@@ -1437,6 +1525,8 @@ entry = {
     'warn_count':           stats.get('warn_count', 0),
     'search_replace_fails': stats.get('search_replace_fails', 0),
     'adaptations':          adaptations,
+    # Rules bypassed by --force at the launch preflight ('' when none refused).
+    'preflight_forced':     os.environ.get('DELEGATE_PREFLIGHT_FORCED', ''),
 }
 entry.update(stats)
 
