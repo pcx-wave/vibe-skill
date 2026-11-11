@@ -341,23 +341,20 @@ fi
 VIOLATION_NAMES=()
 VIOLATION_MSGS=()
 pf_add() { VIOLATION_NAMES+=("$1"); VIOLATION_MSGS+=("$2"); }
-# Rule 1: TASK/MODIFY/VERIFY headers — a prompt without them delegates nothing.
+# Rule 1: TASK/MODIFY headers — a prompt without them delegates nothing.
 # Skipped on a resumed session: its task is already in the history, and the
 # printed resume hint is a bare "continue" prompt.
 if [ -z "${RESUME_SESSION:-}" ]; then
-  printf '%s' "$PROMPT" | grep -q 'TASK:'   || pf_add missing_task_header "missing TASK: header — the prompt must state one imperative"
-  printf '%s' "$PROMPT" | grep -q 'VERIFY:' || pf_add missing_verify_header "missing VERIFY: header — the prompt must name the check command"
+  printf '%s' "$PROMPT" | grep -q '^[[:space:]]*TASK:'   || pf_add missing_task_header "missing TASK: header — the prompt must state one imperative"
   if [ "$READONLY" != 1 ]; then
-    printf '%s' "$PROMPT" | grep -q 'MODIFY:' || pf_add missing_modify_header "missing MODIFY: header — list the files to change (read-only agents may omit it)"
+    printf '%s' "$PROMPT" | grep -q '^[[:space:]]*MODIFY:' || pf_add missing_modify_header "missing MODIFY: header — list the files to change (read-only agents may omit it)"
   fi
 fi
 # Files to modify are not reads: a mechanical change across 10 files is one run.
-MODIFY_FILES=$(printf '%s\n' "$PROMPT" | grep -E 'MODIFY:' | head -1 | sed 's/.*MODIFY:[[:space:]]*//' | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]].*//' | grep .)
-# Ground truth for the PYLOG delegation report: declared files + the VERIFY line,
-# captured before any harness text is appended to the prompt below.
+MODIFY_FILES=$(printf '%s\n' "$PROMPT" | grep -E '^[[:space:]]*MODIFY:' | head -1 | sed 's/^[[:space:]]*MODIFY:[[:space:]]*//' | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]].*//' | grep .)
+# Ground truth for the PYLOG delegation report: the declared files, captured
+# before any harness text is appended to the prompt below.
 export DELEGATE_MODIFY_FILES="$MODIFY_FILES"
-DELEGATE_VERIFY_LINE=$(printf '%s\n' "$PROMPT" | grep 'VERIFY:' | head -1 | sed 's/.*VERIFY:[[:space:]]*//' || true)
-export DELEGATE_VERIFY_LINE
 PROMPT_FILES=$(printf '%s' "$PROMPT" | grep -oE '[A-Za-z0-9_./-]+\.(py|js|ts|jsx|tsx|html|json|md|sh|css|ya?ml|toml|txt|csv)' | sort -u | grep -vxF -f <(printf '%s\n' "${MODIFY_FILES:-/dev/null/none}"))
 N_FILES=$(printf '%s\n' "$PROMPT_FILES" | grep -c .)
 # Rule 2: > 4 named files — extra reads burn the time budget.
@@ -371,7 +368,7 @@ if printf '%s' "$PROMPT" | grep -qiE 'read [a-z0-9_./-]+ first|read (the )?(file
 fi
 # Rule 4: more than one not-yet-existing MODIFY file with a short budget —
 # scaffolding blank files is slow; more than one does not fit under 480 s.
-MODIFY_LINE=$(printf '%s\n' "$PROMPT" | grep -E 'MODIFY:' | head -1 | sed 's/.*MODIFY:[[:space:]]*//')
+MODIFY_LINE=$(printf '%s\n' "$PROMPT" | grep -E '^[[:space:]]*MODIFY:' | head -1 | sed 's/^[[:space:]]*MODIFY:[[:space:]]*//')
 if [ -n "$MODIFY_LINE" ]; then
   UNBORN=0; UNBORN_LIST=""
   IFS=',' read -r -a _mfiles <<< "$MODIFY_LINE"
@@ -432,7 +429,6 @@ if [ "${#VIOLATION_NAMES[@]}" -gt 0 ]; then
     echo "Required prompt format:" >&2
     echo "  TASK: <one imperative>" >&2
     echo "  MODIFY: a.py, b.py   (read-only agents may omit MODIFY)" >&2
-    echo "  VERIFY: <command>" >&2
     echo "(Fix the prompt, or pass --force to bypass all refusals.)" >&2
     exit 2
   fi
@@ -1673,7 +1669,7 @@ entry['wrote_nothing'] = _reason in ('wrote_nothing', 'silent_exit', 'near_empty
 import os as _os, re as _re, subprocess as _sp, shutil as _sh
 _report, _contras, _missing, _undeclared = [], [], [], []
 _written, _vibe_vals = [], {}
-_verify_status, _vibe_report_present = 'absent', False
+_vibe_report_present = False
 _sid_rep = ''
 try:
     _sid_rep = stats.get('session_id') or ''
@@ -1683,7 +1679,7 @@ _limit_reasons = ('turn_cap', 'timeout', 'budget_limit', 'infra_error')
 _fail_reasons = {'wrote_nothing', 'silent_exit', 'near_empty', 'narrated_no_tools',
                  'denied', 'write_mismatch', 'syntax_error', 'sr_fail', 'exit_error',
                  'turn_cap', 'timeout', 'budget_limit', 'refusal', 'infra_error',
-                 'usage_error', 'verify_fail'}
+                 'usage_error'}
 try:
     _ro = _agent in _readonly_agents
 except Exception:
@@ -1766,55 +1762,6 @@ try:
 except Exception:
     pass
 
-# VERIFY: run the caller's VERIFY line and report what it actually did.
-try:
-    _v = (_os.environ.get('DELEGATE_VERIFY_LINE') or '').strip().strip('`').strip()
-    if not _v:
-        _report.append('VERIFY: NOT RUN (no VERIFY: line)')
-        _verify_status = 'absent'
-    else:
-        _vw = _v.split()
-        _not_cmd = (_vw[0] not in ('test', '[', 'true', 'false', 'cd')
-                    and not _sh.which(_vw[0]))
-        if len(_vw) > 1 and _vw[1] in ('for', 'that', 'the', 'whether', 'if'):
-            _not_cmd = True
-        if _re.search(r'\b(confirm|ensure|make sure)\b', _v, _re.I):
-            _not_cmd = True
-        if _not_cmd:
-            _report.append('VERIFY: NOT RUN (not a command)')
-            _verify_status = 'not_command'
-        else:
-            _vout = ''
-            try:
-                _pr = _sp.run(['bash', '-c', _v], stdout=_sp.PIPE,
-                              stderr=_sp.STDOUT, text=True, timeout=60)
-                if _pr.returncode == 0:
-                    _vline, _verify_status = 'VERIFY: PASS', 'pass'
-                else:
-                    _vline, _verify_status = f'VERIFY: FAIL (exit {_pr.returncode})', 'fail'
-                _vout = _pr.stdout or ''
-            except _sp.TimeoutExpired:
-                _vline, _verify_status = 'VERIFY: FAIL (timeout 60s)', 'fail'
-                _vout = ''
-            except Exception:
-                _vline, _verify_status = 'VERIFY: FAIL (could not run)', 'fail'
-                _vout = ''
-            _vline += f' [{_v[:100]}]'
-            _vl = [l for l in _vout.splitlines() if l.strip()]
-            if _vl:
-                _vline += ' | ' + _vl[-1][:150]
-            _report.append(_vline)
-except Exception:
-    pass
-
-# A failed VERIFY means the task is not done: an OK verdict becomes FAILED
-# (RESULT line, failure_reason, exit 3). Limit stops and failures keep theirs.
-if _verify_status == 'fail' and _verdict == 'OK' and _reason in ('ok', 'warn_only', 'ok_resumed_nothing_left'):
-    _reason = 'verify_fail'
-    entry['failure_reason'] = _reason
-    _verdict = 'FAILED'
-    _report[0] = f'STATUS: {_verdict} [{_reason}]'
-
 # RUN: the run's own accounting, from the journalled stats, not from narration.
 try:
     if _os.environ.get('DELEGATE_RESUMED_SESSION'):
@@ -1872,8 +1819,6 @@ try:
                 continue
             if _tok not in _written and _tok not in _dirty:
                 _contras.append(f'CONTRADICTION: Vibe says DONE on {_tok}, but it was not written')
-    if _verify_status == 'fail':
-        _contras.append('CONTRADICTION: VERIFY failed — the task is not done, whatever Vibe or STATUS says')
     _report.extend(_contras)
 except Exception:
     pass
@@ -1920,7 +1865,6 @@ except Exception:
 
 entry['report_files_undeclared'] = _undeclared
 entry['report_files_missing'] = _missing
-entry['verify_status'] = _verify_status
 entry['vibe_report_present'] = _vibe_report_present
 entry['contradictions'] = _contras
 
@@ -1959,7 +1903,6 @@ _FAIL_HINTS = {
     'refusal':           'the model refused the task',
     'infra_error':       'the model API failed mid-run, even after one automatic resume',
     'usage_error':       'Vibe or the model API rejected the request itself (bad agent name, flag, model setting) — fix it, do NOT retry verbatim',
-    'verify_fail':       'files landed but the VERIFY command failed — the task is not done',
 }
 _sid = stats.get('session_id') or ''
 _verr = stats.get('vibe_error') or ''
@@ -1996,7 +1939,7 @@ PYLOG
 # Keeps `vibe-delegate ... && next-step` chains from sailing past a failed run.
 FINAL_REASON=$(cat "$DELEGATE_REASON_FILE" 2>/dev/null)
 case "$FINAL_REASON" in
-  wrote_nothing|silent_exit|near_empty|narrated_no_tools|denied|write_mismatch|syntax_error|sr_fail|turn_cap|timeout|budget_limit|refusal|infra_error|usage_error|verify_fail)
+  wrote_nothing|silent_exit|near_empty|narrated_no_tools|denied|write_mismatch|syntax_error|sr_fail|turn_cap|timeout|budget_limit|refusal|infra_error|usage_error)
     if [ "$VIBE_EXIT" -eq 0 ]; then exit 3; fi ;;
 esac
 exit $VIBE_EXIT

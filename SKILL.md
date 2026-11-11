@@ -51,20 +51,26 @@ Stack: <languages, frameworks>                  # optional
 TASK: <one imperative>
 MODIFY: a.py, b.py                             # files to change; read-only agents omit this line
 CONSTRAINTS: <what must not break; exact signatures; data field paths>  # optional
-VERIFY: grep for "<exact new line>" in <file>
 ```
+
+- **Write your acceptance check before launching, and keep it out of the
+  prompt.** One shell command, a few seconds, exit 0 = the TASK is done; test
+  behaviour, not text (`python3 -c "import calc; assert calc.neg(3) == -3"`
+  beats `grep -q 'def neg'`). Run it yourself after `RESULT: OK`. Vibe never
+  sees it, so it cannot code toward it. Cannot write one command? The TASK is
+  too vague or too big: split it.
 
 - **Never write the code or the final text for Vibe**: not in the prompt, and
   not in a spec/staging file you ask it to apply "exactly". That pays for the
   work twice (21 % of past delegations did it). Describe the goal, the files,
-  the constraints and the check; Vibe writes the code. An exact signature or a
+  the constraints; Vibe writes the code. An exact signature or a
   one-line anchor is fine. If you already have the code, apply it yourself.
   The script refuses prompts with 10+ lines of code (`--allow-code` overrides).
 - **Keep the prompt short** (≈1,500 characters at most): you pay it at output
-  price. Goal, files, constraints, check. Do not explain what Vibe can read
+  price. Goal, files, constraints. Do not explain what Vibe can read
   in the files itself. (Past prompts: 3,000 characters median.)
 - **Cap the reading**: ≤ 4 reference files in total (inline mentions in
-  TASK/VERIFY count). Say: "grep -n for the anchors, read only those regions,
+  TASK count). Say: "grep -n for the anchors, read only those regions,
   never re-read". Never write "read X first" in the prompt; cap `file:line`
   comments to "the 3–5 main formulas". Reading burns the budget (one 2026-11-10
   run: 485 s, 128k tokens, 0 files, all reads).
@@ -73,7 +79,7 @@ VERIFY: grep for "<exact new line>" in <file>
   lines, `sed -n 'A,Bp' file` yourself and pass `--include file:A-B` (repeatable)
   — the harness injects the verbatim region as a REFERENCE block and Vibe uses
   it directly. The launch preflight refuses (exit 2, nothing launched) a prompt
-  that misses a `TASK:`/`MODIFY:`/`VERIFY:` header (MODIFY optional for
+  that misses a `TASK:`/`MODIFY:` header (MODIFY optional for
   read-only agents), names > 4 files, or says "read … first".
 - Files Vibe must read have to be **inside the workdir** (outside paths are
   denied silently).
@@ -114,21 +120,19 @@ The **last line** is the verdict; trust it over anything Vibe narrated.
 
 | Last line | Do |
 |---|---|
-| `RESULT: OK — N file(s) changed` | Writes landed. Review the `DIFF` block printed just above, in this same turn: the harness checks writes, not correctness. Run an extra `git diff`, grep or Read only for what that block truncated or what looks wrong |
+| `RESULT: OK — N file(s) changed` | Writes landed. Run your acceptance check, and review the `DIFF` block printed just above, in this same turn: the harness checks writes, not correctness. Check fails → step 5 (a wrong check: fix it, do not relaunch). Run an extra `git diff`, grep or Read only for what that block truncated or what looks wrong |
 | `RESULT: READ-ONLY run` | Use the `VIBE FINAL ANSWER` block |
 | `RESULT: PARTIAL [reason]` | Files landed despite the limit: review the DIFF, finish with the printed `--resume` — never a fresh run for the rest of this task |
 | `FAILED [turn_cap]` / `[timeout]` / `[budget_limit]` | Maybe partial: FIRST `git status --short` + read the diff (a write in flight at the limit can land late), then the printed `--resume <id>` — never a fresh session for the remainder. Or split |
-| `FAILED [verify_fail]` | Files landed but the `VERIFY:` command failed (exit 3): the task is not done. Read the diff and Vibe's ASSUMED line, then resume to fix |
 | `FAILED [usage_error]` | Bad agent, flag or model setting: fix it, never retry verbatim |
 | `FAILED [infra_error]` | Model API down: retry later or resume |
 | `FAILED [wrote_nothing]`, `[write_mismatch]`, `[syntax_error]`, others | Read the `WRITE AUDIT` block, then step 5 |
 
 Just above the verdict, `=== DELEGATION REPORT ===` is built from disk, not narration:
 STATUS, FILES (vs `MODIFY:`: `declared, not written` / `written, not declared`),
-VERIFY (the `VERIFY:` line run in the workdir, 60 s: PASS / FAIL / NOT RUN if prose),
 RUN, VIBE (its DONE / NOT DONE / ASSUMED / BLOCKED / CHECK lines), RECOVER, NEXT.
-Any `CONTRADICTION:` line overrides `RESULT: OK`: the task is not done. So write
-`VERIFY:` as one shell command; Vibe sees it and may code to it, so check ASSUMED.
+A `CONTRADICTION:` line (Vibe says DONE on a file it did not write) overrides
+`RESULT: OK`: resume the session asking for that file.
 
 `VIBE FINAL ANSWER` is Vibe's own summary; quote it, not the cut `[vibe]` lines.
 Vibe must not commit; if a `COMMITS CREATED` block appears, review those commits.
@@ -136,6 +140,8 @@ Vibe must not commit; if a `COMMITS CREATED` block appears, review those commits
 ## 5. When a run fails
 
 - Read the diff before relaunching, so you do not redo partial work.
+- Your acceptance check failed on an OK run: `--resume <id>` with one sentence
+  naming the wrong behaviour (not your command). Counts as an attempt.
 - Revise the prompt (smaller scope, exact file, exact anchor) and retry. At most
   3 attempts per sub-task.
 - After 3 failures, finish the task yourself and list those files as

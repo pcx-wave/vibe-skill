@@ -67,9 +67,8 @@ Every run appends one JSON entry to `~/.local/share/delegate-runs.jsonl`.
 | `session_id` | string | Vibe session id — pass to `--resume` |
 | `adaptations` | list | Prompt adaptations detected: `contract` \| `output_format` \| `compact` |
 | `report_files_missing` / `report_files_undeclared` | list | DELEGATION REPORT: `MODIFY:` files not written / files written but not in `MODIFY:` |
-| `verify_status` | string | `pass` \| `fail` \| `not_command` (prose `VERIFY:`) \| `absent`. `fail` on an otherwise OK run sets `failure_reason: verify_fail` (RESULT: FAILED, exit 3) |
 | `vibe_report_present` | bool | Vibe ended with its DONE / NOT DONE / ASSUMED / BLOCKED / CHECK lines |
-| `contradictions` | list | `CONTRADICTION:` lines (DONE on an unwritten file, VERIFY failed) |
+| `contradictions` | list | `CONTRADICTION:` lines (Vibe says DONE on a file it did not write) |
 
 ---
 
@@ -227,9 +226,8 @@ TASK: [one single thing to do, stated as an imperative]
 CONSTRAINTS:
 - [what must not break]
 - [expected format if relevant]
-
-VERIFY: grep for "def function_name" in file.py and confirm it exists.
 ```
+Your acceptance check stays out of the prompt; you run it after `RESULT: OK`.
 
 **Formulation rules:**
 - One task per prompt — never "also do X and Y"
@@ -256,10 +254,8 @@ VERIFY: grep for "def function_name" in file.py and confirm it exists.
 > passes them safely via a temp file (`printf %q`). Never interpolate such a prompt
 > directly into a bash heredoc.
 
-**Verification — always use grep, not file re-read:**
-```
-VERIFY: grep for "def extract_labels" in app.py and confirm it exists.
-```
+**Acceptance check — yours, never in the prompt:** one command run after
+`RESULT: OK`, e.g. `python3 -c "import app; assert app.extract_labels([]) == []"`.
 
 ---
 
@@ -278,7 +274,7 @@ VERIFY: grep for "def extract_labels" in app.py and confirm it exists.
 | `timeout-secs` | `300`    | **Total** wall-clock budget of the whole delegation, auto-continue rounds included; never raised. Passed to Vibe as `--time-limit` (the remaining budget on continuation rounds), so a timeout stops cleanly with its export. Measured on 19 successful Vibe 3 runs: p50 95 s, max 386 s. **Budget it as max-turns × 80 s min** (a thinking-model call is ~60–90 s; 12 turns ≈ 600–960 s). A deadline can cut a write mid-call — the file may still land seconds later |
 | `--resume SID` | *(none)* | Continue an earlier session (keeps its context, re-reads nothing). The id is printed on every partial run |
 | `--resume-last` / `--no-resume` | auto | **Auto-resume (default):** reuses the last same-workdir session (run log) when the previous run was limit-stopped; session < 24 h old, on disk, resume chain < 3. Printed `[auto-resume] …`, logged (`resumed_session`, `resume_mode`; `prompt_head` kept for replay). `--no-resume` / env `DELEGATE_AUTO_RESUME=0` = fresh; `--resume-last` = force last (explicit flags bypass the chain cap). A `RESUMED SESSION` note is injected into the prompt. Limit stop → orphaned write payloads saved to `.vibe-recovery/` (not applied) |
-| `--force` | off | **Launch preflight (blocking, exit 2 before vibe is launched):** (1) missing `TASK:` / `MODIFY:` / `VERIFY:` header (MODIFY optional for read-only agents); (2) prompt names > 4 files; (3) prompt says "read … first"; (4) MODIFY lists > 1 file not on disk yet while timeout-secs < 480; (5) a vibe run for this workdir finished < 2 h ago without `--resume` / `--resume-last` / `--no-resume`. `--force` bypasses all refusals; bypassed rule names are logged as `preflight_forced` in the run entry |
+| `--force` | off | **Launch preflight (blocking, exit 2 before vibe is launched):** (1) missing `TASK:` / `MODIFY:` header at line start (MODIFY optional for read-only agents); (2) prompt names > 4 files; (3) prompt says "read … first"; (4) MODIFY lists > 1 file not on disk yet while timeout-secs < 480; (5) a vibe run for this workdir finished < 2 h ago without `--resume` / `--resume-last` / `--no-resume`. `--force` bypasses all refusals; bypassed rule names are logged as `preflight_forced` in the run entry |
 | `--continue-rounds N` / `--no-continue` | `2` | Extra rounds auto-run on the **same session** when Vibe stops on its turn limit |
 | `--require STR` | *(none)* | Repeatable. Abort before launch if STR is absent in the workdir — pass the `search_replace` anchor here |
 | `--with-review N` | *(none)* | After Vibe finishes, Claude reviews the diff and re-delegates fixes up to N times (see Step 8) |
@@ -581,7 +577,7 @@ When `--with-review` is not used, all five fields are omitted (do not write them
 - **Check diff between sub-tasks** — never launch the next one blind.
 - **Ghostwrite only as a last resort** — always delegate to Vibe first; never write code yourself before 3 failed attempts. After 3 failures the default is to ghostwrite and finish (declare it in the Step 7 report). `--no-ghostwrite` disables the fallback and halts instead. See Step 6.
 - **Max 12 turns per call** — decompose instead of extending.
-- **Grep target before delegating** — `grep -n "exact_target" file.py` before any `search_replace` prompt. Pass that anchor as `--require "exact_target"` so the delegate aborts before launching if it's gone. Always use grep for VERIFY, not file re-read.
+- **Grep target before delegating** — `grep -n "exact_target" file.py` before any `search_replace` prompt. Pass that anchor as `--require "exact_target"` so the delegate aborts before launching if it's gone. Check the result with your own command, not a file re-read.
 - **Match model to task** — inline-edit tasks → `deepseek-flash` or `mistral-medium-3.5`; never route edits to agent-mode `devstral-small` (read/explore only).
 - **UTF-8 / emoji in the prompt** → the script handles it via temp file, but test with a short prompt first.
 - **UTF-8 in OLD/NEW strings → mandate python3, no exceptions** — before writing any Vibe prompt, scan every OLD and NEW string for accented chars (é è à ç ù ô î û ñ...) or emoji. If ANY are present, the prompt MUST explicitly instruct Vibe to use `python3 -c` with `pathlib.Path.read_text/write_text(encoding='utf-8')` for those changes — never `search_replace`. A `search_replace [OK]` on UTF-8 content is a silent no-op: the tool call is accepted but the string is never found. This is the #1 cause of phantom successful runs that changed nothing.
