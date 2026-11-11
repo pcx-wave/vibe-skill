@@ -118,9 +118,17 @@ The **last line** is the verdict; trust it over anything Vibe narrated.
 | `RESULT: READ-ONLY run` | Use the `VIBE FINAL ANSWER` block |
 | `RESULT: PARTIAL [reason]` | Files landed despite the limit: review the DIFF, finish with the printed `--resume` — never a fresh run for the rest of this task |
 | `FAILED [turn_cap]` / `[timeout]` / `[budget_limit]` | Maybe partial: FIRST `git status --short` + read the diff (a write in flight at the limit can land late), then the printed `--resume <id>` — never a fresh session for the remainder. Or split |
+| `FAILED [verify_fail]` | Files landed but the `VERIFY:` command failed (exit 3): the task is not done. Read the diff and Vibe's ASSUMED line, then resume to fix |
 | `FAILED [usage_error]` | Bad agent, flag or model setting: fix it, never retry verbatim |
 | `FAILED [infra_error]` | Model API down: retry later or resume |
 | `FAILED [wrote_nothing]`, `[write_mismatch]`, `[syntax_error]`, others | Read the `WRITE AUDIT` block, then step 5 |
+
+Just above the verdict, `=== DELEGATION REPORT ===` is built from disk, not narration:
+STATUS, FILES (vs `MODIFY:`: `declared, not written` / `written, not declared`),
+VERIFY (the `VERIFY:` line run in the workdir, 60 s: PASS / FAIL / NOT RUN if prose),
+RUN, VIBE (its DONE / NOT DONE / ASSUMED / BLOCKED / CHECK lines), RECOVER, NEXT.
+Any `CONTRADICTION:` line overrides `RESULT: OK`: the task is not done. So write
+`VERIFY:` as one shell command; Vibe sees it and may code to it, so check ASSUMED.
 
 `VIBE FINAL ANSWER` is Vibe's own summary; quote it, not the cut `[vibe]` lines.
 Vibe must not commit; if a `COMMITS CREATED` block appears, review those commits.

@@ -66,6 +66,10 @@ Every run appends one JSON entry to `~/.local/share/delegate-runs.jsonl`.
 | `vibe_rounds` / `auto_continued` | int | Rounds run on the same session / how many were auto-continue rounds |
 | `session_id` | string | Vibe session id — pass to `--resume` |
 | `adaptations` | list | Prompt adaptations detected: `contract` \| `output_format` \| `compact` |
+| `report_files_missing` / `report_files_undeclared` | list | DELEGATION REPORT: `MODIFY:` files not written / files written but not in `MODIFY:` |
+| `verify_status` | string | `pass` \| `fail` \| `not_command` (prose `VERIFY:`) \| `absent`. `fail` on an otherwise OK run sets `failure_reason: verify_fail` (RESULT: FAILED, exit 3) |
+| `vibe_report_present` | bool | Vibe ended with its DONE / NOT DONE / ASSUMED / BLOCKED / CHECK lines |
+| `contradictions` | list | `CONTRADICTION:` lines (DONE on an unwritten file, VERIFY failed) |
 
 ---
 

@@ -353,6 +353,11 @@ if [ -z "${RESUME_SESSION:-}" ]; then
 fi
 # Files to modify are not reads: a mechanical change across 10 files is one run.
 MODIFY_FILES=$(printf '%s\n' "$PROMPT" | grep -E 'MODIFY:' | head -1 | sed 's/.*MODIFY:[[:space:]]*//' | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]].*//' | grep .)
+# Ground truth for the PYLOG delegation report: declared files + the VERIFY line,
+# captured before any harness text is appended to the prompt below.
+export DELEGATE_MODIFY_FILES="$MODIFY_FILES"
+DELEGATE_VERIFY_LINE=$(printf '%s\n' "$PROMPT" | grep 'VERIFY:' | head -1 | sed 's/.*VERIFY:[[:space:]]*//' || true)
+export DELEGATE_VERIFY_LINE
 PROMPT_FILES=$(printf '%s' "$PROMPT" | grep -oE '[A-Za-z0-9_./-]+\.(py|js|ts|jsx|tsx|html|json|md|sh|css|ya?ml|toml|txt|csv)' | sort -u | grep -vxF -f <(printf '%s\n' "${MODIFY_FILES:-/dev/null/none}"))
 N_FILES=$(printf '%s\n' "$PROMPT_FILES" | grep -c .)
 # Rule 2: > 4 named files — extra reads burn the time budget.
@@ -458,7 +463,14 @@ RUN BUDGET: $MAX_TURNS turns total; one model call can cost 60-90s, so a time li
 
 CHECKS: run only quick, targeted checks (one test file, one import, one script), each well under 60 s. Never run a full build, a whole-project type-check or the whole test suite: the caller verifies afterwards, and a long command can eat the run's whole time budget.
 
-GIT: do not commit, push, stash, reset or switch branches. Leave every change uncommitted in the working tree: the caller reviews the diff and commits."
+GIT: do not commit, push, stash, reset or switch branches. Leave every change uncommitted in the working tree: the caller reviews the diff and commits.
+
+END REPORT: end your final message with exactly these five lines, a few words each, 'none' when empty:
+DONE: <what is finished>
+NOT DONE: <what is left>
+ASSUMED: <guesses you made>
+BLOCKED: <what stopped you>
+CHECK: <what the caller should check>"
 if [ "$READONLY" = 1 ]; then
   PROMPT="$PROMPT
 
@@ -1145,7 +1157,7 @@ fi
 # the text of the last model completion in the journal. Round copies are read
 # too, because the live journal is pruned on every resume.
 if [ -n "$SESSION_LOG" ]; then
-  AUDIT_RUN_DIR="$RUN_DIR" python3 - "$(dirname "$SESSION_LOG")" << 'PYANSWER'
+  AUDIT_RUN_DIR="$RUN_DIR" FINAL_ANSWER_FILE="$RUN_DIR/final-answer.txt" python3 - "$(dirname "$SESSION_LOG")" << 'PYANSWER'
 import glob, json, os, re, sys
 sess = sys.argv[1]
 files = sorted(glob.glob(sess + "/journal/*.jsonl"))
@@ -1175,6 +1187,13 @@ for f in files:
 # Same control-char stripping as the stream parser: this text reaches a terminal
 # and the orchestrating model.
 text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", best[1])
+_fa_path = os.environ.get("FINAL_ANSWER_FILE", "")
+if _fa_path:
+    try:
+        with open(_fa_path, "w") as _fa_fh:
+            _fa_fh.write(text)
+    except OSError:
+        pass
 print("")
 print("=== VIBE FINAL ANSWER (full, last model message from the session journal) ===")
 print(text if text else "(none — Vibe stopped before writing a final message; see RESULT below)")
@@ -1462,6 +1481,10 @@ export DELEGATE_END_NS="$END_NS"
 export DELEGATE_PROMPT_FILE="$PROMPT_FILE"
 export DELEGATE_RESUMED_SESSION="${RESUME_SESSION:-}"
 export DELEGATE_RESUME_MODE="${RESUME_MODE:-}"
+export DELEGATE_FINAL_ANSWER_FILE="$RUN_DIR/final-answer.txt"
+export DELEGATE_CHANGED_LIST="$CHANGED"
+export DELEGATE_GIT_BEFORE="$GIT_BEFORE"
+export DELEGATE_SENTINEL="$SENTINEL"
 
 python3 << 'PYLOG'
 import json, os, re
@@ -1643,6 +1666,264 @@ entry['failure_reason'] = _reason
 # wrote_nothing kept for backwards compat with older delegate-report versions
 entry['wrote_nothing'] = _reason in ('wrote_nothing', 'silent_exit', 'near_empty')
 
+# ── Ground-truth delegation report ─────────────────────────────────────────────
+# Best-effort block: every subprocess / file call is guarded, so a report
+# problem can never break the log write or the RESULT line below. The cwd of
+# this process is already the workdir.
+import os as _os, re as _re, subprocess as _sp, shutil as _sh
+_report, _contras, _missing, _undeclared = [], [], [], []
+_written, _vibe_vals = [], {}
+_verify_status, _vibe_report_present = 'absent', False
+_sid_rep = ''
+try:
+    _sid_rep = stats.get('session_id') or ''
+except Exception:
+    pass
+_limit_reasons = ('turn_cap', 'timeout', 'budget_limit', 'infra_error')
+_fail_reasons = {'wrote_nothing', 'silent_exit', 'near_empty', 'narrated_no_tools',
+                 'denied', 'write_mismatch', 'syntax_error', 'sr_fail', 'exit_error',
+                 'turn_cap', 'timeout', 'budget_limit', 'refusal', 'infra_error',
+                 'usage_error', 'verify_fail'}
+try:
+    _ro = _agent in _readonly_agents
+except Exception:
+    _ro = False
+
+# STATUS: the same verdict word the RESULT line below will print.
+if _reason in _limit_reasons and _fc > 0:
+    _verdict = 'PARTIAL'
+elif _reason in _fail_reasons:
+    _verdict = 'FAILED'
+elif _ro:
+    _verdict = 'READ-ONLY'
+else:
+    _verdict = 'OK'
+_report.append(f'STATUS: {_verdict} [{_reason}]')
+
+# FILES: what actually landed, cross-checked against the declared MODIFY set.
+try:
+    _written = [w for w in (_os.environ.get('DELEGATE_CHANGED_LIST') or '').split() if w]
+    if _ro:
+        _report.append('FILES: n/a (read-only)')
+    elif not _written:
+        _report.append('FILES: none written')
+    else:
+        _base = (_os.environ.get('DELEGATE_GIT_BEFORE') or '').strip()
+        if _base in ('', 'no-git'):
+            _base = 'HEAD'
+        _numstat = {}
+        try:
+            # --relative: paths relative to the workdir (= cwd), like CHANGED,
+            # even when the workdir is a subdirectory of the repo.
+            _ns = _sp.run(['git', 'diff', '--numstat', '--relative', _base],
+                          capture_output=True, text=True, timeout=30)
+            for _ln in (_ns.stdout or '').splitlines():
+                _parts = _ln.split('\t')
+                if len(_parts) == 3:
+                    _numstat[_parts[2]] = (_parts[0], _parts[1])
+        except Exception:
+            _numstat = {}
+        _shown = []
+        for _wf in _written:
+            if _wf in _numstat:
+                _shown.append(f'+{_numstat[_wf][0]} -{_numstat[_wf][1]} {_wf}')
+            else:
+                try:
+                    with open(_wf, errors='replace') as _fh:
+                        _nlines = sum(1 for _ in _fh)
+                except Exception:
+                    _nlines = 0
+                _shown.append(f'new {_wf} ({_nlines} lines)')
+        if len(_shown) > 6:
+            _report.append('FILES: ' + ', '.join(_shown[:6]) + f' (+{len(_shown) - 6} more)')
+        else:
+            _report.append('FILES: ' + ', '.join(_shown))
+except Exception:
+    pass
+# Declared vs written: also on a run that wrote nothing (every declared file is
+# then missing) — that is the case the check exists for.
+_declared = []
+try:
+    for _dl in (_os.environ.get('DELEGATE_MODIFY_FILES') or '').split('\n'):
+        _dl = _dl.strip()
+        if not _dl:
+            continue
+        if _dl.startswith('./'):
+            _dl = _dl[2:]
+        if _os.path.isabs(_dl):
+            try:
+                _dl = _os.path.relpath(_dl, _os.getcwd())
+            except ValueError:
+                pass
+        _declared.append(_dl)
+    if not _ro:
+        _missing = sorted(set(_declared) - set(_written))
+        _undeclared = sorted(set(_written) - set(_declared)) if _declared else []
+        if _missing:
+            _report.append('  declared, not written: ' + ', '.join(_missing))
+        if _undeclared:
+            _report.append('  written, not declared: ' + ', '.join(_undeclared))
+except Exception:
+    pass
+
+# VERIFY: run the caller's VERIFY line and report what it actually did.
+try:
+    _v = (_os.environ.get('DELEGATE_VERIFY_LINE') or '').strip().strip('`').strip()
+    if not _v:
+        _report.append('VERIFY: NOT RUN (no VERIFY: line)')
+        _verify_status = 'absent'
+    else:
+        _vw = _v.split()
+        _not_cmd = (_vw[0] not in ('test', '[', 'true', 'false', 'cd')
+                    and not _sh.which(_vw[0]))
+        if len(_vw) > 1 and _vw[1] in ('for', 'that', 'the', 'whether', 'if'):
+            _not_cmd = True
+        if _re.search(r'\b(confirm|ensure|make sure)\b', _v, _re.I):
+            _not_cmd = True
+        if _not_cmd:
+            _report.append('VERIFY: NOT RUN (not a command)')
+            _verify_status = 'not_command'
+        else:
+            _vout = ''
+            try:
+                _pr = _sp.run(['bash', '-c', _v], stdout=_sp.PIPE,
+                              stderr=_sp.STDOUT, text=True, timeout=60)
+                if _pr.returncode == 0:
+                    _vline, _verify_status = 'VERIFY: PASS', 'pass'
+                else:
+                    _vline, _verify_status = f'VERIFY: FAIL (exit {_pr.returncode})', 'fail'
+                _vout = _pr.stdout or ''
+            except _sp.TimeoutExpired:
+                _vline, _verify_status = 'VERIFY: FAIL (timeout 60s)', 'fail'
+                _vout = ''
+            except Exception:
+                _vline, _verify_status = 'VERIFY: FAIL (could not run)', 'fail'
+                _vout = ''
+            _vline += f' [{_v[:100]}]'
+            _vl = [l for l in _vout.splitlines() if l.strip()]
+            if _vl:
+                _vline += ' | ' + _vl[-1][:150]
+            _report.append(_vline)
+except Exception:
+    pass
+
+# A failed VERIFY means the task is not done: an OK verdict becomes FAILED
+# (RESULT line, failure_reason, exit 3). Limit stops and failures keep theirs.
+if _verify_status == 'fail' and _verdict == 'OK' and _reason in ('ok', 'warn_only', 'ok_resumed_nothing_left'):
+    _reason = 'verify_fail'
+    entry['failure_reason'] = _reason
+    _verdict = 'FAILED'
+    _report[0] = f'STATUS: {_verdict} [{_reason}]'
+
+# RUN: the run's own accounting, from the journalled stats, not from narration.
+try:
+    if _os.environ.get('DELEGATE_RESUMED_SESSION'):
+        _run_mode = 'resumed (' + (_os.environ.get('DELEGATE_RESUME_MODE') or '') + ')'
+    else:
+        _run_mode = 'fresh'
+    _report.append(f"RUN: turns {stats.get('vibe_steps')}, {duration}s, "
+                  f"${entry.get('cost_usd', 0):.4f}, session {_sid_rep or 'none'}, {_run_mode}")
+except Exception:
+    pass
+
+# VIBE: the five END REPORT labels the harness asked Vibe to end with.
+try:
+    _fa = _os.environ.get('DELEGATE_FINAL_ANSWER_FILE') or ''
+    if _fa and _os.path.exists(_fa):
+        _lab_re = _re.compile(r'^(NOT DONE|DONE|ASSUMED|BLOCKED|CHECK)\*{0,2}\s*:\s*(.*)$')
+        with open(_fa, errors='replace') as _fh:
+            for _raw in _fh:
+                _l = _raw.strip().lstrip('-*#').strip()
+                if not _l:
+                    continue
+                _m = _lab_re.match(_l)
+                if _m and _m.group(1) not in _vibe_vals:
+                    _vibe_vals[_m.group(1)] = _m.group(2).strip().strip('*').strip()
+    if _vibe_vals:
+        _vibe_report_present = True
+        _report.append('VIBE:')
+        for _lab in ('NOT DONE', 'DONE', 'ASSUMED', 'BLOCKED', 'CHECK'):
+            if _lab in _vibe_vals:
+                _report.append(f'  {_lab}: {_vibe_vals[_lab][:150]}')
+    else:
+        _report.append('VIBE: Vibe report absent (run cut?)')
+except Exception:
+    pass
+
+# CONTRADICTION: Vibe's claims checked against the disk.
+try:
+    if _vibe_vals.get('DONE'):
+        # Exact cwd-relative paths changed vs HEAD or untracked (an earlier run
+        # of a resumed task may have written the file), not a substring match.
+        _dirty = set()
+        for _cmd in (['git', 'diff', '--name-only', '--relative', 'HEAD'],
+                     ['git', 'ls-files', '--others', '--exclude-standard']):
+            try:
+                _dirty.update(_sp.run(_cmd, capture_output=True, text=True,
+                                      timeout=30).stdout.split())
+            except Exception:
+                pass
+        # Only tokens that name a file: a declared path, or a known extension
+        # (not foo.bar() calls, versions or "e.g").
+        _ext_re = _re.compile(r'\.(py|js|ts|jsx|tsx|html|json|md|sh|css|ya?ml|toml|txt|csv|go|rs|rb|java|c|h|cpp|sql)$')
+        for _tok in sorted(set(_re.findall(r'[A-Za-z0-9_./-]+\.[A-Za-z0-9_-]+', _vibe_vals['DONE']))):
+            _tok = _tok[2:] if _tok.startswith('./') else _tok
+            if not (_tok in _declared or _ext_re.search(_tok)):
+                continue
+            if _tok not in _written and _tok not in _dirty:
+                _contras.append(f'CONTRADICTION: Vibe says DONE on {_tok}, but it was not written')
+    if _verify_status == 'fail':
+        _contras.append('CONTRADICTION: VERIFY failed — the task is not done, whatever Vibe or STATUS says')
+    _report.extend(_contras)
+except Exception:
+    pass
+
+# RECOVER: payloads written into .vibe-recovery/ after the sentinel was created.
+try:
+    _recs = []
+    _sent = _os.environ.get('DELEGATE_SENTINEL') or ''
+    _sent_m = None
+    if _sent:
+        try:
+            _sent_m = _os.path.getmtime(_sent)
+        except OSError:
+            _sent_m = None
+    if _sent_m is not None and _os.path.isdir('.vibe-recovery'):
+        for _rn in sorted(_os.listdir('.vibe-recovery')):
+            _rp = _os.path.join('.vibe-recovery', _rn)
+            try:
+                if _os.path.isfile(_rp) and _os.path.getmtime(_rp) > _sent_m:
+                    _recs.append(_rn)
+            except OSError:
+                pass
+    if _recs:
+        _report.append(f'RECOVER: {len(_recs)} payload(s) in .vibe-recovery/: '
+                       + ', '.join(_recs[:3]))
+    else:
+        _report.append('RECOVER: none')
+except Exception:
+    pass
+
+# NEXT: what the caller should do with this run.
+try:
+    if _reason in _limit_reasons and _sid_rep:
+        _report.append(f'NEXT: vibe-delegate {_os.getcwd()} "continue" '
+                       f'{_os.environ.get("DELEGATE_MAX_TURNS", "")} --resume {_sid_rep}')
+    elif _contras:
+        _report.append('NEXT: resolve the CONTRADICTION line(s) before accepting the run')
+    elif _verdict in ('OK', 'READ-ONLY'):
+        _report.append('NEXT: none')
+    else:
+        _report.append('NEXT: fix the cause named in RESULT; do not relaunch verbatim')
+except Exception:
+    pass
+
+entry['report_files_undeclared'] = _undeclared
+entry['report_files_missing'] = _missing
+entry['verify_status'] = _verify_status
+entry['vibe_report_present'] = _vibe_report_present
+entry['contradictions'] = _contras
+
 with open(LOG, 'a') as f:
     f.write(json.dumps(entry) + '\n')
 
@@ -1652,6 +1933,12 @@ saved_str = f', saved ~${saved:.4f} vs Claude' if saved > 0 else ''
 adapt_str = f'  [{",".join(adaptations)}]' if adaptations else ''
 reason_str = f'  {_reason}' if _reason != 'ok' else ''
 print(f'[log] → {LOG}  ({tok} tokens, exit {_exit}, {duration}s{saved_str}{reason_str}{adapt_str})')
+
+# Ground-truth report: the last block before the RESULT verdict line.
+print('')
+print('=== DELEGATION REPORT ===')
+for _rline in _report:
+    print(_rline)
 
 # Loud, last-line verdict. failure_reason used to be a single word at the end of
 # the [log] line, with exit code 0 — easy to read past. Callers (and Claude) must
@@ -1672,6 +1959,7 @@ _FAIL_HINTS = {
     'refusal':           'the model refused the task',
     'infra_error':       'the model API failed mid-run, even after one automatic resume',
     'usage_error':       'Vibe or the model API rejected the request itself (bad agent name, flag, model setting) — fix it, do NOT retry verbatim',
+    'verify_fail':       'files landed but the VERIFY command failed — the task is not done',
 }
 _sid = stats.get('session_id') or ''
 _verr = stats.get('vibe_error') or ''
@@ -1708,7 +1996,7 @@ PYLOG
 # Keeps `vibe-delegate ... && next-step` chains from sailing past a failed run.
 FINAL_REASON=$(cat "$DELEGATE_REASON_FILE" 2>/dev/null)
 case "$FINAL_REASON" in
-  wrote_nothing|silent_exit|near_empty|narrated_no_tools|denied|write_mismatch|syntax_error|sr_fail|turn_cap|timeout|budget_limit|refusal|infra_error|usage_error)
+  wrote_nothing|silent_exit|near_empty|narrated_no_tools|denied|write_mismatch|syntax_error|sr_fail|turn_cap|timeout|budget_limit|refusal|infra_error|usage_error|verify_fail)
     if [ "$VIBE_EXIT" -eq 0 ]; then exit 3; fi ;;
 esac
 exit $VIBE_EXIT
